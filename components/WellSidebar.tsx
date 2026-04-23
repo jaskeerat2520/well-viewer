@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
-import { WellDetail, Priority, PRIORITY_COLOR, CountySummary, NearYouResult } from '@/lib/types';
+import { WellDetail, Priority, PRIORITY_COLOR, CountySummary, NearYouResult, LAND_COVER_LABEL, LAND_COVER_COLOR, LandCoverCode, CH4_SOURCE_COLOR, CH4_SOURCE_LABEL } from '@/lib/types';
 
 // ── Satellite types ────────────────────────────────────────────────────────────
 interface ThumbPair { baseline_url?: string | null; recent_url?: string | null; }
@@ -18,6 +18,7 @@ interface GeeScores {
   ndvi: { baseline?: number; recent?: number; change?: number; relative_change?: number; score?: number; anomaly_type?: string; baseline_years?: string; recent_years?: string; error?: string; };
   methane: { well_ppb?: number | null; background_ppb?: number | null; anomaly_ratio?: number | null; is_anomaly?: boolean; error?: string; };
 }
+type SatelliteResult = GeeScores;
 
 const NDVI_TYPE_COLOR: Record<string, string> = {
   stable: '#22c55e', minor_change: '#eab308', moderate_change: '#f97316',
@@ -25,74 +26,43 @@ const NDVI_TYPE_COLOR: Record<string, string> = {
   low_baseline_skip: '#6b7280', no_data: '#6b7280',
 };
 
-// ── Shared before/after image slider ──────────────────────────────────────────
-function ImageSlider({ pair, baseLabel, recentLabel }: {
-  pair: ThumbPair; baseLabel: string; recentLabel: string;
-}) {
-  const [slider, setSlider] = useState(50);
-  if (!pair.baseline_url && !pair.recent_url)
-    return <p className="text-xs text-gray-600 py-2 text-center">No imagery available</p>;
-  return (
-    <div className="relative w-full rounded overflow-hidden bg-gray-800" style={{ aspectRatio: '1' }}>
-      {pair.baseline_url && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={pair.baseline_url} alt="baseline" className="absolute inset-0 w-full h-full object-cover" />
-      )}
-      {pair.recent_url && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={pair.recent_url} alt="recent" className="absolute inset-0 w-full h-full object-cover"
-          style={{ clipPath: `inset(0 ${100 - slider}% 0 0)` }} />
-      )}
-      <div className="absolute top-0 bottom-0 w-px bg-white/80 pointer-events-none" style={{ left: `${slider}%` }} />
-      {/* Well marker — always at exact centre since GEE buffers symmetrically */}
-      <div className="absolute pointer-events-none" style={{ top: '50%', left: '50%', transform: 'translate(-50%,-50%)' }}>
-        <div style={{ width: 12, height: 12, borderRadius: '50%', background: '#ef4444', border: '2px solid #fff', boxShadow: '0 0 0 3px rgba(239,68,68,0.4)' }} />
-      </div>
-      <span className="absolute bottom-1.5 left-2 text-xs bg-black/60 text-white px-1.5 py-0.5 rounded">{baseLabel}</span>
-      <span className="absolute bottom-1.5 right-2 text-xs bg-black/60 text-white px-1.5 py-0.5 rounded">{recentLabel}</span>
-      <input type="range" min={0} max={100} value={slider} onChange={e => setSlider(Number(e.target.value))}
-        className="absolute inset-0 w-full h-full opacity-0 cursor-ew-resize" />
-    </div>
-  );
+interface ThumbResult {
+  baseline_year?: string;
+  recent_year?: string;
+  gap_years?: number;
+  imagery?: ThumbPair;
+  ndvi?: ThumbPair & { baseline_mean?: number; recent_mean?: number; change?: number; relative?: number; anomaly_type?: string; };
+  ndmi?: ThumbPair & { baseline_mean?: number; recent_mean?: number; change?: number; is_dry_anomaly?: boolean; };
+  swir?: ThumbPair;
 }
 
-// ── Unified four-analysis satellite panel ──────────────────────────────────────
-type SatTab = 'imagery' | 'ndvi' | 'ndmi' | 'swir' | 'terrain';
+type ThumbStatus = 'idle' | 'loading' | 'done' | 'error';
 
-const TAB_META: Record<SatTab, { label: string; title: string; blurb: string }> = {
-  imagery:  { label: 'True colour', title: 'Site overview',        blurb: 'Natural-colour view. Look for cleared land, well pads, access roads, or changed land cover.' },
-  ndvi:     { label: 'Vegetation',  title: 'Vegetation ghost',     blurb: 'NDVI (NIR−Red)/(NIR+Red). Even after trees regrow, soil compaction and residual hydrocarbons cause a "productivity gap" — lighter green or yellow vs. surrounding forest.' },
-  ndmi:     { label: 'Moisture',    title: 'Salt burn',            blurb: 'NDMI (NIR−SWIR1)/(NIR+SWIR1). Produced-water brine spills kill soil microbes for decades. A dry patch on the moisture map exactly marks an old spill site.' },
-  swir:     { label: 'SWIR',        title: 'Gas / soil stress',    blurb: 'False-colour B12/B8/B4. Methane replacing soil oxygen creates bald spots; exposed soil and stressed vegetation appear vivid red/magenta in SWIR false colour.' },
-  terrain:  { label: 'Terrain',     title: 'Artificial flatness',  blurb: 'USGS NED 10 m DEM hillshade. A well pad is an unnaturally flat square carved into forest. Natural floors are uneven — the pad shelf persists for decades under regrown trees.' },
-};
-
-function LandsatSlider({ lat, lng }: { lat: number; lng: number }) {
-  const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
-  const [thumbs, setThumbs] = useState<ThumbResult | null>(null);
+// Renders the baseline/recent pair from a supplied ThumbPair. Load state and
+// the "Load imagery" button live at SatellitePanel level so both Imagery and
+// Vegetation tabs share one GEE call.
+function ThumbPairView({
+  pair, status, errMsg, onLoad, onRetry,
+  baseLabel, recentLabel, footer,
+}: {
+  pair: ThumbPair | undefined;
+  status: ThumbStatus;
+  errMsg: string;
+  onLoad: () => void;
+  onRetry: () => void;
+  baseLabel?: string;
+  recentLabel?: string;
+  footer?: string;
+}) {
   const [slider, setSlider] = useState(50);
-  const [errMsg, setErrMsg] = useState('');
+  const [zoom, setZoom]     = useState(1);
 
-  useEffect(() => { setStatus('idle'); setThumbs(null); }, [lat, lng]);
-
-  async function load() {
-    setStatus('loading');
-    try {
-      const res = await fetch(`/api/satellite-thumb?lat=${lat}&lng=${lng}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      setThumbs(data);
-      setStatus('done');
-    } catch (e: unknown) {
-      setErrMsg(e instanceof Error ? e.message : 'Failed');
-      setStatus('error');
-    }
-  }
+  // Reset zoom when the underlying imagery changes (e.g. new well selected)
+  useEffect(() => { setZoom(1); }, [pair?.baseline_url, pair?.recent_url]);
 
   if (status === 'idle') return (
     <div>
-      <button onClick={load}
+      <button onClick={onLoad}
         className="w-full py-2 rounded text-xs font-medium bg-gray-700 hover:bg-gray-600 transition-colors text-white"
       >
         Load before/after imagery ↗
@@ -102,7 +72,7 @@ function LandsatSlider({ lat, lng }: { lat: number; lng: number }) {
   );
 
   if (status === 'loading') return (
-    <p className="text-xs text-gray-400 text-center animate-pulse py-4">Fetching Landsat imagery…</p>
+    <p className="text-xs text-gray-400 text-center animate-pulse py-4">Fetching Sentinel-2 imagery…</p>
   );
 
   if (status === 'error') return (
@@ -112,45 +82,67 @@ function LandsatSlider({ lat, lng }: { lat: number; lng: number }) {
           ? 'GEE service not running — start satellite_service.py'
           : errMsg}
       </p>
-      <button onClick={() => setStatus('idle')} className="text-xs text-gray-600 hover:text-white mt-1">Retry</button>
+      <button onClick={onRetry} className="text-xs text-gray-600 hover:text-white mt-1">Retry</button>
+    </div>
+  );
+
+  const baselineUrl = pair?.baseline_url;
+  const recentUrl   = pair?.recent_url;
+
+  if (!baselineUrl && !recentUrl) return (
+    <div>
+      <p className="text-xs text-gray-500 text-center py-4">No imagery available for this location</p>
+      <button onClick={onRetry} className="block mx-auto text-xs text-gray-600 hover:text-white mt-1">Retry</button>
     </div>
   );
 
   return (
     <div>
       <div className="relative w-full rounded overflow-hidden bg-gray-800" style={{ aspectRatio: '1' }}>
-        {thumbs?.baseline_url && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={thumbs.baseline_url} alt="Baseline Landsat"
-            className="absolute inset-0 w-full h-full object-cover" />
-        )}
-        {thumbs?.recent_url && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={thumbs.recent_url} alt="Recent Landsat"
-            className="absolute inset-0 w-full h-full object-cover"
-            style={{ clipPath: `inset(0 ${100 - slider}% 0 0)` }}
-          />
-        )}
-        <div className="absolute top-0 bottom-0 w-px bg-white/80 pointer-events-none" style={{ left: `${slider}%` }} />
-        {/* Well location marker — always at image centre since thumbnail is centred on the point */}
+        {/* Zoomable image stack. The divider line lives INSIDE this wrapper so
+            it shares the transform with the clip-path — otherwise, at zoom>1
+            the clip edge and the visible line end up at different screen x
+            positions. Outer-space overlays (well marker, labels) stay put. */}
+        <div className="absolute inset-0" style={{ transform: `scale(${zoom})`, transformOrigin: 'center center' }}>
+          {baselineUrl && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={baselineUrl} alt="baseline" className="absolute inset-0 w-full h-full object-cover" />
+          )}
+          {recentUrl && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={recentUrl} alt="recent"
+              className="absolute inset-0 w-full h-full object-cover"
+              style={{ clipPath: `inset(0 ${100 - slider}% 0 0)` }}
+            />
+          )}
+          <div className="absolute top-0 bottom-0 bg-white/80 pointer-events-none"
+            style={{ left: `${slider}%`, width: `${1 / zoom}px` }} />
+        </div>
         <div className="absolute pointer-events-none" style={{ top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>
           <div style={{ width: 12, height: 12, borderRadius: '50%', background: '#ef4444', border: '2px solid #fff', boxShadow: '0 0 0 3px rgba(239,68,68,0.4)' }} />
         </div>
-        <span className="absolute bottom-1.5 left-2 text-xs bg-black/60 text-white px-1.5 py-0.5 rounded">
-          {thumbs?.baseline_year}
-        </span>
-        <span className="absolute bottom-1.5 right-2 text-xs bg-black/60 text-white px-1.5 py-0.5 rounded">
-          {thumbs?.recent_year}
-        </span>
-        <input
-          type="range" min={0} max={100} value={slider}
-          onChange={e => setSlider(Number(e.target.value))}
-          className="absolute inset-0 w-full h-full opacity-0 cursor-ew-resize"
-        />
+        {baseLabel && (
+          <span className="absolute bottom-1.5 left-2 text-xs bg-black/60 text-white px-1.5 py-0.5 rounded">{baseLabel}</span>
+        )}
+        {recentLabel && (
+          <span className="absolute bottom-1.5 right-2 text-xs bg-black/60 text-white px-1.5 py-0.5 rounded">{recentLabel}</span>
+        )}
+        {/* Zoom controls — sit above the transparent comparison-slider input */}
+        <div className="absolute top-1.5 right-1.5 flex flex-col gap-0.5 z-20">
+          <button onClick={() => setZoom(z => Math.min(+(z + 0.5).toFixed(1), 2.5))}
+            disabled={zoom >= 2.5}
+            className="w-6 h-6 flex items-center justify-center bg-black/60 hover:bg-black/80 disabled:opacity-30 text-white text-sm rounded leading-none">+</button>
+          <button onClick={() => setZoom(z => Math.max(+(z - 0.5).toFixed(1), 1))}
+            disabled={zoom <= 1}
+            className="w-6 h-6 flex items-center justify-center bg-black/60 hover:bg-black/80 disabled:opacity-30 text-white text-sm rounded leading-none">−</button>
+        </div>
+        {zoom > 1 && (
+          <span className="absolute top-1.5 left-1.5 text-xs bg-black/60 text-white px-1.5 py-0.5 rounded z-20">{zoom}×</span>
+        )}
+        <input type="range" min={0} max={100} value={slider} onChange={e => setSlider(Number(e.target.value))}
+          className="absolute inset-0 w-full h-full opacity-0 cursor-ew-resize z-10" />
       </div>
-      <p className="text-xs text-gray-600 mt-1.5 text-center">
-        Landsat · {thumbs?.gap_years}-year gap · drag to compare
-      </p>
+      {footer && <p className="text-xs text-gray-600 mt-1.5 text-center">{footer}</p>}
     </div>
   );
 }
@@ -161,9 +153,51 @@ function SatellitePanel({ lat, lng }: { lat: number; lng: number }) {
   const [errMsg, setErrMsg]   = useState('');
   const [tab, setTab]         = useState<'imagery' | 'ndvi' | 'methane'>('imagery');
 
-  // Reset when the well changes
-  useEffect(() => { setStatus('idle'); setData(null); setTab('imagery'); }, [lat, lng]);
+  // Shared thumbnail state — used by both Imagery and Vegetation tabs so they
+  // reuse a single /thumbnails GEE call.
+  const [thumbStatus, setThumbStatus] = useState<ThumbStatus>('idle');
+  const [thumbs, setThumbs]           = useState<ThumbResult | null>(null);
+  const [thumbErr, setThumbErr]       = useState('');
 
+  // Reset + auto-fire imagery analysis the moment a new well is selected.
+  // By the time the user glances at the Imagery or Vegetation tab, the GEE
+  // signed URLs are usually already back and the images are decoding.
+  useEffect(() => {
+    setStatus('idle'); setData(null); setTab('imagery');
+    setThumbs(null); setThumbErr('');
+
+    let cancelled = false;
+    setThumbStatus('loading');
+    fetch(`/api/satellite-thumb?lat=${lat}&lng=${lng}`)
+      .then(async res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const d = await res.json();
+        if (d.error) throw new Error(d.error);
+        if (!cancelled) { setThumbs(d); setThumbStatus('done'); }
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setThumbErr(e instanceof Error ? e.message : 'Failed');
+        setThumbStatus('error');
+      });
+    return () => { cancelled = true; };
+  }, [lat, lng]);
+
+  // Manual reload (used by the Retry button after an error)
+  async function loadThumbs() {
+    setThumbStatus('loading');
+    try {
+      const res = await fetch(`/api/satellite-thumb?lat=${lat}&lng=${lng}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const d = await res.json();
+      if (d.error) throw new Error(d.error);
+      setThumbs(d);
+      setThumbStatus('done');
+    } catch (e: unknown) {
+      setThumbErr(e instanceof Error ? e.message : 'Failed');
+      setThumbStatus('error');
+    }
+  }
 
   async function load() {
     setStatus('loading');
@@ -199,7 +233,16 @@ function SatellitePanel({ lat, lng }: { lat: number; lng: number }) {
       </div>
 
       {tab === 'imagery' ? (
-        <LandsatSlider lat={lat} lng={lng} />
+        <ThumbPairView
+          pair={thumbs?.imagery}
+          status={thumbStatus}
+          errMsg={thumbErr}
+          onLoad={loadThumbs}
+          onRetry={() => setThumbStatus('idle')}
+          baseLabel={thumbs?.baseline_year}
+          recentLabel={thumbs?.recent_year}
+          footer={thumbs ? `Sentinel-2 · ${thumbs.gap_years}-year gap · drag to compare` : undefined}
+        />
       ) : (
         <>
           <button onClick={load}
@@ -265,7 +308,19 @@ function SatellitePanel({ lat, lng }: { lat: number; lng: number }) {
 
       {/* ── Vegetation tab ── */}
       {tab === 'ndvi' && (
-        <div className="space-y-2 text-xs">
+        <div className="space-y-3 text-xs">
+          {/* NDVI before/after slider — shares /thumbnails call with Imagery tab */}
+          <ThumbPairView
+            pair={thumbs?.ndvi}
+            status={thumbStatus}
+            errMsg={thumbErr}
+            onLoad={loadThumbs}
+            onRetry={() => setThumbStatus('idle')}
+            baseLabel={thumbs?.baseline_year}
+            recentLabel={thumbs?.recent_year}
+            footer={thumbs ? 'NDVI · red = bare / yellow = sparse / green = dense vegetation' : undefined}
+          />
+
           {ndvi.error ? (
             <p className="text-gray-500">{ndvi.error}</p>
           ) : (
@@ -313,16 +368,31 @@ function SatellitePanel({ lat, lng }: { lat: number; lng: number }) {
               <Row label="Background CH₄ (ppb)" value={methane.background_ppb?.toLocaleString() ?? '—'} />
               <Row label="Anomaly ratio"         value={methane.anomaly_ratio?.toFixed(3) ?? '—'} highlight={methane.is_anomaly} />
               <p className="text-gray-600 mt-2 leading-relaxed">
-                Sentinel-5P resolution is ~5.5 km — readings reflect the pixel,
-                not just this well. Ratio &gt;1.05 is flagged as elevated.
+                Global atmospheric methane is ~1,900 ppb. A single well leak
+                adds only a few ppb — below Sentinel-5P&apos;s ~5–10 ppb noise
+                floor. A ratio near 1.000 means this <em>area</em> is at normal
+                background, not that the well isn&apos;t leaking. This signal is
+                most useful for finding <em>regions</em> of elevated methane.
+                Ratio &gt;1.05 is flagged as elevated.
               </p>
             </>
           )}
         </div>
       )}
 
-      {/* ── Ohio OSIP imagery tab ── */}
-      {tab === 'imagery' && <LandsatSlider lat={lat} lng={lng} />}
+      {/* ── Imagery tab ── */}
+      {tab === 'imagery' && (
+        <ThumbPairView
+          pair={thumbs?.imagery}
+          status={thumbStatus}
+          errMsg={thumbErr}
+          onLoad={loadThumbs}
+          onRetry={() => setThumbStatus('idle')}
+          baseLabel={thumbs?.baseline_year}
+          recentLabel={thumbs?.recent_year}
+          footer={thumbs ? `Sentinel-2 · ${thumbs.gap_years}-year gap · drag to compare` : undefined}
+        />
+      )}
     </div>
   );
 }
@@ -411,12 +481,30 @@ async function fetchWellByApiNo(api_no: string): Promise<WellDetail | null> {
     water_risk_score:         data.water_risk_score,
     population_risk_score:    data.population_risk_score,
     inactivity_score:         data.inactivity_score,
+    emissions_risk_score:     data.emissions_risk_score ?? null,
+    vegetation_risk_score:    data.vegetation_risk_score ?? null,
+    terrain_risk_score:       data.terrain_risk_score ?? null,
+    composite_risk_score:     data.composite_risk_score ?? null,
     nearest_water_distance_m: data.nearest_water_distance_m,
     within_protection_zone:   data.within_protection_zone,
     operator_status:          data.operator_status,
     population_within_1km:    data.population_within_1km,
     population_within_5km:    data.population_within_5km,
     years_inactive:           data.years_inactive,
+    land_cover:               data.land_cover ?? null,
+    ch4_is_anomaly:           data.ch4_is_anomaly ?? null,
+    ch4_signal_source:        data.ch4_signal_source ?? null,
+    ch4_well_ppb:             data.ch4_well_ppb ?? null,
+    ch4_background_ppb:       data.ch4_background_ppb ?? null,
+    ch4_anomaly_ratio:        data.ch4_anomaly_ratio ?? null,
+    thermal_anomaly_c:        data.thermal_anomaly_c ?? null,
+    is_artificially_flat:     data.is_artificially_flat ?? null,
+    slope_ratio:              data.slope_ratio ?? null,
+    veg_anomaly_detected:     data.veg_anomaly_detected ?? null,
+    veg_anomaly_type:         data.veg_anomaly_type ?? null,
+    ndvi_relative:            data.ndvi_relative ?? null,
+    ndvi_trend_slope:         data.ndvi_trend_slope ?? null,
+    cluster_neighbor_count:   data.cluster_neighbor_count ?? null,
     well: {
       well_name: data.well_name,
       county:    data.county,
@@ -530,6 +618,18 @@ export default function WellSidebar({ well, selectedCounty, filters, onFilterCha
             >
               Street View ↗
             </a>
+            {well.land_cover != null && LAND_COVER_LABEL[well.land_cover as LandCoverCode] && (
+              <span
+                className="inline-block px-3 py-1 rounded-full text-xs font-semibold"
+                style={{
+                  backgroundColor: LAND_COVER_COLOR[well.land_cover as LandCoverCode],
+                  color: '#000',
+                }}
+                title="ESA WorldCover 2021 class at well location"
+              >
+                {LAND_COVER_LABEL[well.land_cover as LandCoverCode]}
+              </span>
+            )}
           </div>
 
           {/* Plain-language impact callout */}
@@ -541,11 +641,18 @@ export default function WellSidebar({ well, selectedCounty, filters, onFilterCha
             <ScoreBar label="Water risk"      value={well.water_risk_score} />
             <ScoreBar label="Population risk" value={well.population_risk_score} />
             <ScoreBar label="Inactivity"      value={well.inactivity_score} />
+            <ScoreBar label="Emissions"       value={well.emissions_risk_score ?? 0} />
+            <ScoreBar label="Vegetation"      value={well.vegetation_risk_score ?? 0} />
+            <ScoreBar label="Terrain"         value={well.terrain_risk_score ?? 0} />
           </div>
+
+          {/* Remote-sensing detail */}
+          <RemoteSensingSection well={well} />
 
           {/* Well metadata */}
           <div className="space-y-2 text-sm">
             <p className="text-xs text-gray-400 uppercase tracking-wider mb-2">Details</p>
+            <Row label="Coordinates" value={well.well?.lat && well.well?.lng ? `${well.well.lat.toFixed(5)}, ${well.well.lng.toFixed(5)}` : '—'} />
             <Row label="Status"       value={well.well?.status} />
             <Row label="Well type"    value={well.well?.well_type} />
             <Row label="Operator"     value={well.well?.operator} />
@@ -587,6 +694,124 @@ function Row({ label, value, highlight }: { label: string; value?: string | numb
       <span className={`text-right truncate ${highlight ? 'text-orange-400' : 'text-white'}`}>
         {value ?? '—'}
       </span>
+    </div>
+  );
+}
+
+function RemoteSensingSection({ well }: { well: WellDetail }) {
+  // Show the section only when at least one RS signal has data. Purely null
+  // rows would be noise — the surface-anomaly run covers <5% of wells.
+  const hasCh4 = well.ch4_signal_source != null || well.ch4_well_ppb != null;
+  const hasThermal = well.thermal_anomaly_c != null;
+  const hasVeg = well.veg_anomaly_type != null || well.ndvi_relative != null || well.ndvi_trend_slope != null;
+  const hasTerrain = well.is_artificially_flat != null || well.slope_ratio != null;
+  const hasCluster = (well.cluster_neighbor_count ?? 0) > 0;
+  if (!hasCh4 && !hasThermal && !hasVeg && !hasTerrain && !hasCluster) return null;
+
+  const sourceKey = well.ch4_signal_source ?? '';
+  const sourceColor = CH4_SOURCE_COLOR[sourceKey] ?? '#6b7280';
+  const sourceLabel = CH4_SOURCE_LABEL[sourceKey] ?? well.ch4_signal_source ?? '—';
+
+  return (
+    <div className="mb-4">
+      <p className="text-xs text-gray-400 uppercase tracking-wider mb-2">Remote sensing</p>
+
+      {hasCh4 && (
+        <div className="mb-2 space-y-1 text-sm">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span
+              className="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold"
+              style={{ backgroundColor: sourceColor, color: '#000' }}
+              title="Which CH₄ data tier produced this well's emissions score"
+            >
+              {sourceLabel}
+            </span>
+            {well.ch4_is_anomaly && (
+              <span className="text-[10px] text-orange-400 font-semibold uppercase tracking-wider">
+                anomaly
+              </span>
+            )}
+          </div>
+          {well.ch4_well_ppb != null && (
+            <Row label="CH₄ well"    value={`${well.ch4_well_ppb.toFixed(1)} ppb`} />
+          )}
+          {well.ch4_background_ppb != null && (
+            <Row label="CH₄ bg"      value={`${well.ch4_background_ppb.toFixed(1)} ppb`} />
+          )}
+          {well.ch4_anomaly_ratio != null && (
+            <Row label="Anomaly ratio" value={well.ch4_anomaly_ratio.toFixed(2)} />
+          )}
+        </div>
+      )}
+
+      {hasThermal && well.thermal_anomaly_c != null && (
+        <div className="mb-2 text-sm">
+          <Row
+            label="Thermal Δ"
+            value={`${well.thermal_anomaly_c > 0 ? '+' : ''}${well.thermal_anomaly_c.toFixed(1)} °C`}
+            highlight={well.thermal_anomaly_c >= 2}
+          />
+        </div>
+      )}
+
+      {hasVeg && (
+        <div className="mb-2 space-y-1 text-sm">
+          {well.veg_anomaly_type && (
+            <div className="flex items-center gap-2">
+              <span
+                className="inline-block w-2 h-2 rounded-full"
+                style={{ backgroundColor: NDVI_TYPE_COLOR[well.veg_anomaly_type] ?? '#6b7280' }}
+              />
+              <span className="text-gray-300 capitalize">
+                {well.veg_anomaly_type.replace(/_/g, ' ')}
+              </span>
+            </div>
+          )}
+          {well.ndvi_relative != null && (
+            <Row label="NDVI change" value={`${(well.ndvi_relative * 100).toFixed(1)}%`}
+              highlight={well.ndvi_relative < -0.15} />
+          )}
+          {well.ndvi_trend_slope != null && (
+            <Row label="NDVI trend" value={`${well.ndvi_trend_slope >= 0 ? '+' : ''}${well.ndvi_trend_slope.toFixed(4)}/yr`}
+              highlight={well.ndvi_trend_slope < -0.005} />
+          )}
+        </div>
+      )}
+
+      {hasTerrain && (
+        <div className="mb-2 space-y-1 text-sm">
+          {well.is_artificially_flat && (
+            <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold bg-purple-500 text-black">
+              artificially flat
+            </span>
+          )}
+          {well.slope_ratio != null && (
+            <Row label="Slope ratio" value={well.slope_ratio.toFixed(2)}
+              highlight={well.slope_ratio < 0.4} />
+          )}
+        </div>
+      )}
+
+      {hasCluster && well.cluster_neighbor_count != null && (
+        <div className="mb-2 space-y-1 text-sm">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span
+              className="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold"
+              style={{ backgroundColor: '#ec4899', color: '#000' }}
+              title="Number of other wells whose centroid is 10–30 m away"
+            >
+              {well.cluster_neighbor_count === 1
+                ? '1 neighbor 10–30m'
+                : `${well.cluster_neighbor_count} neighbors 10–30m`}
+            </span>
+            {well.cluster_neighbor_count >= 5 && (
+              <span className="text-[10px] text-pink-300 font-semibold uppercase tracking-wider">
+                dense pad
+              </span>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

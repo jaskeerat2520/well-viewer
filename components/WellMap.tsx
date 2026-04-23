@@ -4,12 +4,79 @@ import { useEffect, useRef, useState } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { supabase } from '@/lib/supabase';
-import { WellDetail, Priority, PRIORITY_COLOR, CountySummary, WATER_SOURCE_COLOR, NearYouResult } from '@/lib/types';
+import { WellDetail, Priority, PRIORITY_COLOR, CountySummary, WATER_SOURCE_COLOR, NearYouResult, LandCoverCode, LAND_COVER_LABEL, LAND_COVER_COLOR } from '@/lib/types';
+
+type ColorMode = 'priority' | 'emissions' | 'vegetation' | 'terrain';
+
+const COLOR_MODE_LABEL: Record<ColorMode, string> = {
+  priority:   'Priority',
+  emissions:  'Emissions',
+  vegetation: 'Vegetation',
+  terrain:    'Terrain',
+};
+
+const COLOR_MODE_SCORE_FIELD: Record<Exclude<ColorMode, 'priority'>, string> = {
+  emissions:  'emissions_risk_score',
+  vegetation: 'vegetation_risk_score',
+  terrain:    'terrain_risk_score',
+};
+
+function rsScoreColorExpr(field: string): mapboxgl.Expression {
+  return [
+    'interpolate', ['linear'],
+    ['coalesce', ['get', field], 0],
+    0,   '#1e3a5f',
+    25,  '#2563eb',
+    50,  '#f97316',
+    75,  '#ef4444',
+    100, '#7f1d1d',
+  ];
+}
+
+type RsFlag = 'ch4' | 'plume' | 'veg' | 'flat' | 'cluster';
+
+const RS_FLAG_LABEL: Record<RsFlag, string> = {
+  ch4:     'CH₄ anomaly',
+  plume:   'Near plume',
+  veg:     'Vegetation loss',
+  flat:    'Artificially flat',
+  cluster: 'Clustered (≥2 neighbors 10–30m)',
+};
+
+const RS_FLAG_COLOR: Record<RsFlag, string> = {
+  ch4:     '#f59e0b',
+  plume:   '#dc2626',
+  veg:     '#14b8a6',
+  flat:    '#a78bfa',
+  cluster: '#ec4899',
+};
+
+const RS_FLAG_EXPR: Record<RsFlag, mapboxgl.Expression> = {
+  ch4:     ['==', ['get', 'ch4_is_anomaly'], true],
+  plume:   ['in', ['get', 'ch4_signal_source'], ['literal', ['plume:carbonmapper', 'plume:methaneair']]],
+  veg:     ['==', ['get', 'veg_anomaly_detected'], true],
+  flat:    ['==', ['get', 'is_artificially_flat'], true],
+  cluster: ['>=', ['coalesce', ['get', 'cluster_neighbor_count'], 0], 2],
+};
+
+type WellsTab = 'priority' | 'color' | 'flags' | 'land';
+
+const WELLS_TABS: { key: WellsTab; label: string }[] = [
+  { key: 'priority', label: 'Priority' },
+  { key: 'color',    label: 'Color'    },
+  { key: 'flags',    label: 'Flags'    },
+  { key: 'land',     label: 'Land'     },
+];
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
 
 
 const PRIORITY_ORDER: Priority[] = ['critical', 'high', 'medium', 'low'];
+
+// Full set of WorldCover codes we classify in score_land_cover.py. If every
+// code is selected (or the user toggled "all"), we skip the land-cover filter
+// expression entirely so wells with a NULL land_cover stay visible too.
+const LAND_COVER_CODES: LandCoverCode[] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100];
 
 type CountyMetric = 'avg_risk_score' | 'critical_count' | 'high_count' | 'medium_count' | 'low_count' | 'annual_co2e_mt';
 
@@ -89,14 +156,28 @@ interface Props {
 export default function WellMap({ filters, onFilterChange, onSelectWell, onSelectCounty, onNearYouResult, centerOn }: Props) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
-  const [loadStatus, setLoadStatus] = useState('Loading critical + high wells…');
+  const [loadStatus, setLoadStatus] = useState('Loading critical wells…');
+  // 'all' → show every class including wells with null land_cover. A Set →
+  // restrict to those specific codes (wells with null get hidden).
+  const [landCoverFilter, setLandCoverFilter] = useState<Set<LandCoverCode> | 'all'>('all');
   const [satellite, setSatellite] = useState<'off' | 'bing' | 'esri' | 'mapbox' | 'osip'>('off');
   const [countyMetric, setCountyMetric] = useState<CountyMetric>('avg_risk_score');
   const [showCounties, setShowCounties] = useState(true);
   const [showWaterSources, setShowWaterSources] = useState(false);
   const [waterSourcesLoaded, setWaterSourcesLoaded] = useState(false);
+  const [showPlumes, setShowPlumes] = useState(false);
+  const [plumesLoaded, setPlumesLoaded] = useState(false);
+  const [colorMode, setColorMode] = useState<ColorMode>('priority');
+  const [rsFlags, setRsFlags] = useState<Set<RsFlag>>(new Set());
+  const [wellsTab, setWellsTab] = useState<WellsTab>('priority');
+  // Hard filter (AND'd onto every priority tier): exclude wells that have a
+  // named active operator — i.e. keep only historic_owner + orphan_program.
+  // Unlike RS flags this applies to critical too, since it's an explicit
+  // "plugging candidates only" intent rather than a soft signal.
+  const [orphansOnly, setOrphansOnly] = useState(false);
   const [hoverInfo, setHoverInfo] = useState<{
-    x: number; y: number; priority: Priority; risk_score: number | null;
+    x: number; y: number; priority: Priority; risk_score: number | null; api_no: string; county: string;
+    emissions_risk_score: number | null; vegetation_risk_score: number | null; terrain_risk_score: number | null;
   } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchSuggestions, setSearchSuggestions] = useState<MapboxFeature[]>([]);
@@ -247,6 +328,18 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
         });
 
         m.on('click', 'counties-fill', (e) => {
+          // Mapbox fires click events independently for every layer intersecting
+          // the click point, and e.originalEvent.stopPropagation() stops only
+          // the DOM event — not Mapbox's layer-click delegation. So a plume or
+          // well click would also trigger this county handler and its fitBounds
+          // (maxZoom: 10) would yank the user back to zoom 10 whenever they're
+          // more zoomed in. Guard by checking for higher-priority features at
+          // the same point; if any exist, defer to their handlers.
+          const topHits = m.queryRenderedFeatures(e.point, {
+            layers: ['methane-plumes-dot', 'wells-critical', 'wells-high', 'wells-medium', 'wells-low'],
+          });
+          if (topHits.length > 0) return;
+
           const feature = e.features?.[0];
           if (!feature) return;
           const bounds = getGeometryBounds(feature.geometry as GeoJSON.Geometry);
@@ -323,6 +416,94 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
       m.on('mouseenter', 'water-sources-fill', () => { m.getCanvas().style.cursor = 'pointer'; });
       m.on('mouseleave', 'water-sources-fill', () => { m.getCanvas().style.cursor = ''; });
 
+      // ── Methane plume detections (CarbonMapper + MethaneAIR L4) ──────────
+      m.addSource('methane-plumes', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+
+      m.addLayer({
+        id: 'methane-plumes-glow',
+        type: 'circle',
+        source: 'methane-plumes',
+        layout: { visibility: 'none' },
+        paint: {
+          'circle-color': [
+            'interpolate', ['linear'], ['log10', ['max', ['coalesce', ['get', 'emission_kgph'], 1], 1]],
+            1, '#fbbf24',   // 10 kg/hr
+            2, '#f97316',   // 100 kg/hr
+            3, '#dc2626',   // 1,000 kg/hr
+            4, '#7f1d1d',   // 10,000 kg/hr
+          ],
+          'circle-radius': [
+            'interpolate', ['linear'], ['zoom'],
+            5,  12,
+            9,  24,
+            13, 40,
+          ],
+          'circle-opacity': 0.25,
+          'circle-blur': 1.2,
+        },
+      });
+
+      m.addLayer({
+        id: 'methane-plumes-dot',
+        type: 'circle',
+        source: 'methane-plumes',
+        layout: { visibility: 'none' },
+        paint: {
+          'circle-color': [
+            'interpolate', ['linear'], ['log10', ['max', ['coalesce', ['get', 'emission_kgph'], 1], 1]],
+            1, '#fbbf24',
+            2, '#f97316',
+            3, '#dc2626',
+            4, '#7f1d1d',
+          ],
+          // Radius on a log(emission) + zoom ramp so a 10,000 kg/hr super-emitter
+          // is visibly larger than a 100 kg/hr detection without drowning out
+          // everything else at low zoom.
+          'circle-radius': [
+            'interpolate', ['linear'], ['zoom'],
+            5, [
+              'interpolate', ['linear'], ['log10', ['max', ['coalesce', ['get', 'emission_kgph'], 1], 1]],
+              1, 3, 2, 4, 3, 6, 4, 9,
+            ],
+            10, [
+              'interpolate', ['linear'], ['log10', ['max', ['coalesce', ['get', 'emission_kgph'], 1], 1]],
+              1, 6, 2, 9, 3, 13, 4, 18,
+            ],
+          ],
+          'circle-stroke-width': 1.5,
+          'circle-stroke-color': '#000',
+          'circle-opacity': 0.95,
+        },
+      });
+
+      m.on('click', 'methane-plumes-dot', (e) => {
+        const props = e.features?.[0]?.properties;
+        if (!props) return;
+        const flux = Number(props.emission_kgph);
+        const when = props.observed_at
+          ? new Date(props.observed_at as string).toISOString().slice(0, 10)
+          : '—';
+        new mapboxgl.Popup({ maxWidth: '260px' })
+          .setLngLat(e.lngLat)
+          .setHTML(`
+            <div style="font-size:12px">
+              <div style="font-weight:600;margin-bottom:4px">CH₄ plume</div>
+              <div style="color:#9ca3af">Flux: <span style="color:#fff">${isFinite(flux) ? flux.toFixed(0) + ' kg/hr' : '—'}</span></div>
+              <div style="color:#9ca3af">Source: <span style="color:#fff">${props.source ?? '—'}</span></div>
+              <div style="color:#9ca3af">Platform: <span style="color:#fff">${props.platform ?? '—'}</span></div>
+              <div style="color:#9ca3af">Sector: <span style="color:#fff">${props.sector ?? '—'}</span></div>
+              <div style="color:#9ca3af">Observed: <span style="color:#fff">${when}</span></div>
+            </div>
+          `)
+          .addTo(m);
+        e.originalEvent.stopPropagation();
+      });
+      m.on('mouseenter', 'methane-plumes-dot', () => { m.getCanvas().style.cursor = 'pointer'; });
+      m.on('mouseleave', 'methane-plumes-dot', () => { m.getCanvas().style.cursor = ''; });
+
       // ── Wells source + layers (on top of counties) ───────────────────────
       // Add empty source first — we'll populate it progressively
       m.addSource('wells', {
@@ -377,6 +558,11 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
             y: e.point.y,
             priority: props.priority as Priority,
             risk_score: props.risk_score ?? null,
+            api_no: props.api_no ?? '',
+            county: props.county ?? '',
+            emissions_risk_score:  props.emissions_risk_score ?? null,
+            vegetation_risk_score: props.vegetation_risk_score ?? null,
+            terrain_risk_score:    props.terrain_risk_score ?? null,
           });
         });
         m.on('mouseleave', `wells-${priority}`, () => {
@@ -414,9 +600,15 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
         onSelectCounty(null);
       });
 
-      // Shared accumulator so both load passes build on each other
+      // Load in strict priority order — a combined `IN ('critical', 'high')`
+      // query returns rows in DB-scan order, so critical dots wait behind
+      // hundreds of high rows before the first render. Fetching critical
+      // alone puts the 39 dots on the map within one round trip.
       const allFeatures: GeoJSON.Feature[] = [];
-      await loadWells(['critical', 'high'], m, allFeatures, setLoadStatus);
+      setLoadStatus('Loading critical wells…');
+      await loadWells(['critical'], m, allFeatures, setLoadStatus);
+      setLoadStatus('Loading high-priority wells…');
+      await loadWells(['high'], m, allFeatures, setLoadStatus);
       setLoadStatus('Loading remaining wells…');
       await loadWells(['medium', 'low'], m, allFeatures, setLoadStatus);
       setLoadStatus('');
@@ -438,6 +630,92 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
         map.current!.setLayoutProperty(glowId, 'visibility', vis);
     });
   }, [filters]);
+
+  // Rebuild per-layer filter expressions whenever land-cover or RS flags change.
+  // Each wells-<priority> layer originally used:
+  //     ['==', ['get', 'priority'], priority]
+  // We AND that with: land-cover `in` check, and OR-combined RS flag checks.
+  useEffect(() => {
+    if (!map.current) return;
+    const lcExpr: mapboxgl.Expression | null =
+      landCoverFilter === 'all'
+        ? null
+        : ['in', ['get', 'land_cover'], ['literal', Array.from(landCoverFilter)]];
+
+    const flagExprs = Array.from(rsFlags).map(f => RS_FLAG_EXPR[f]);
+    const flagExpr: mapboxgl.Expression | null =
+      flagExprs.length === 0 ? null
+      : flagExprs.length === 1 ? flagExprs[0]
+      : (['any', ...flagExprs] as mapboxgl.Expression);
+
+    // Hard filter: exclude wells that have an active named operator. Applied
+    // to every priority tier (including critical) because this is an explicit
+    // plugging-candidate intent, unlike RS flags which are soft signals.
+    const orphanExpr: mapboxgl.Expression | null = orphansOnly
+      ? ['!=', ['get', 'operator_status'], 'named_operator']
+      : null;
+
+    PRIORITY_ORDER.forEach(priority => {
+      const base: mapboxgl.Expression = ['==', ['get', 'priority'], priority];
+      const parts: mapboxgl.Expression[] = [base];
+      if (lcExpr) parts.push(lcExpr);
+      // Critical is the top tier by composite score — the scoring system has
+      // already "flagged" these. RS flags are filters meant to narrow the bulk
+      // of wells down to specific signals, so applying them to critical would
+      // hide wells that are already maximally prioritised. Critical therefore
+      // ignores RS flags and stays visible whenever its priority filter is on.
+      if (flagExpr && priority !== 'critical') parts.push(flagExpr);
+      if (orphanExpr) parts.push(orphanExpr);
+      const combined: mapboxgl.Expression =
+        parts.length === 1 ? parts[0] : (['all', ...parts] as mapboxgl.Expression);
+      const layerId = `wells-${priority}`;
+      const glowId  = `wells-${priority}-glow`;
+      if (map.current!.getLayer(layerId)) map.current!.setFilter(layerId, combined);
+      if (map.current!.getLayer(glowId))  map.current!.setFilter(glowId,  combined);
+    });
+  }, [landCoverFilter, rsFlags, orphansOnly]);
+
+  // Dot recolors by selected RS score; glow stays pinned to PRIORITY_COLOR so
+  // critical/high tiers remain recognizable even when most of their dots would
+  // score 0 on the selected RS dimension and render as dark basemap-blue.
+  useEffect(() => {
+    if (!map.current) return;
+    PRIORITY_ORDER.forEach(priority => {
+      const layerId = `wells-${priority}`;
+      const glowId  = `wells-${priority}-glow`;
+      const dotColor: string | mapboxgl.Expression =
+        colorMode === 'priority'
+          ? PRIORITY_COLOR[priority]
+          : rsScoreColorExpr(COLOR_MODE_SCORE_FIELD[colorMode]);
+      if (map.current!.getLayer(layerId)) map.current!.setPaintProperty(layerId, 'circle-color', dotColor);
+      if (map.current!.getLayer(glowId))  map.current!.setPaintProperty(glowId,  'circle-color', PRIORITY_COLOR[priority]);
+    });
+  }, [colorMode]);
+
+  // Toggle methane plumes layer + lazy-load GeoJSON on first show
+  useEffect(() => {
+    if (!map.current?.getLayer('methane-plumes-dot')) return;
+    const vis = showPlumes ? 'visible' : 'none';
+    map.current.setLayoutProperty('methane-plumes-dot',  'visibility', vis);
+    map.current.setLayoutProperty('methane-plumes-glow', 'visibility', vis);
+    if (showPlumes && !plumesLoaded) {
+      loadPlumes(map.current).then(ok => { if (ok) setPlumesLoaded(true); });
+    }
+  }, [showPlumes, plumesLoaded]);
+
+  function toggleLandCover(code: LandCoverCode) {
+    setLandCoverFilter(prev => {
+      const next = new Set<LandCoverCode>(prev === 'all' ? LAND_COVER_CODES : prev);
+      if (next.has(code)) next.delete(code);
+      else next.add(code);
+      // Collapsing back to the full set is equivalent to 'all' semantically
+      // but 'all' also shows wells where land_cover is NULL — preserve that.
+      if (next.size === LAND_COVER_CODES.length) return 'all';
+      return next;
+    });
+  }
+
+  function resetLandCover() { setLandCoverFilter('all'); }
 
   // Sync satellite layer visibility
   useEffect(() => {
@@ -610,92 +888,300 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
           🛰 {satellite === 'bing' ? 'Bing (Vexcel)' : satellite === 'esri' ? 'Esri imagery' : satellite === 'mapbox' ? 'Mapbox imagery' : satellite === 'osip' ? 'Ohio OSIP (1ft)' : 'Satellite'}
         </button>
 
-        {/* Priority filters — well dots */}
-        <div className="flex flex-col gap-1 bg-black/70 rounded p-2 border border-white/10">
-          <span className="text-xs text-gray-400 uppercase tracking-wider mb-0.5">Wells</span>
-          {PRIORITY_ORDER.map(p => {
-            const active = filters.includes(p);
-            return (
-              <button
-                key={p}
-                onClick={() => onFilterChange(p)}
-                className="flex items-center gap-2 px-2 py-1 rounded text-xs font-medium transition-opacity text-left"
-                style={{
-                  backgroundColor: active ? PRIORITY_COLOR[p] : 'transparent',
-                  color: active ? '#000' : PRIORITY_COLOR[p],
-                  border: `1px solid ${PRIORITY_COLOR[p]}`,
-                  opacity: active ? 1 : 0.5,
-                }}
-              >
-                <span className="w-16 capitalize">{p}</span>
-              </button>
-            );
-          })}
+        {/* ── WELLS card (tabbed) ───────────────────────────────────────── */}
+        <div className="flex flex-col gap-1 bg-black/70 rounded p-2 border border-white/10 w-52">
+          <div className="flex gap-0.5 mb-1 bg-black/60 rounded p-0.5">
+            {WELLS_TABS.map(t => {
+              const active = wellsTab === t.key;
+              // Mark tabs that currently have a non-default selection so the
+              // user can tell at a glance that a hidden filter is active.
+              const dirty =
+                (t.key === 'priority' && filters.length < PRIORITY_ORDER.length) ||
+                (t.key === 'color'    && colorMode !== 'priority') ||
+                (t.key === 'flags'    && (rsFlags.size > 0 || orphansOnly)) ||
+                (t.key === 'land'     && landCoverFilter !== 'all');
+              return (
+                <button
+                  key={t.key}
+                  onClick={() => setWellsTab(t.key)}
+                  className="relative flex-1 px-1 py-1 rounded text-[10px] font-semibold uppercase tracking-wider transition-colors"
+                  style={{
+                    backgroundColor: active ? '#fff' : 'transparent',
+                    color: active ? '#000' : '#9ca3af',
+                  }}
+                >
+                  {t.label}
+                  {dirty && !active && (
+                    <span className="absolute top-0.5 right-0.5 w-1 h-1 rounded-full bg-orange-400" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {wellsTab === 'priority' && (
+            <div className="flex flex-col gap-1">
+              {PRIORITY_ORDER.map(p => {
+                const active = filters.includes(p);
+                return (
+                  <button
+                    key={p}
+                    onClick={() => onFilterChange(p)}
+                    className="flex items-center gap-2 px-2 py-1 rounded text-xs font-medium transition-opacity text-left"
+                    style={{
+                      backgroundColor: active ? PRIORITY_COLOR[p] : 'transparent',
+                      color: active ? '#000' : PRIORITY_COLOR[p],
+                      border: `1px solid ${PRIORITY_COLOR[p]}`,
+                      opacity: active ? 1 : 0.5,
+                    }}
+                  >
+                    <span className="capitalize">{p}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {wellsTab === 'color' && (
+            <div className="flex flex-col gap-1">
+              {(Object.keys(COLOR_MODE_LABEL) as ColorMode[]).map(mode => {
+                const active = colorMode === mode;
+                const swatch = mode === 'priority' ? PRIORITY_COLOR.critical : '#ef4444';
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => setColorMode(mode)}
+                    className="px-2 py-1 rounded text-xs font-medium transition-opacity text-left"
+                    style={{
+                      backgroundColor: active ? swatch : 'transparent',
+                      color: active ? '#000' : swatch,
+                      border: `1px solid ${swatch}`,
+                      opacity: active ? 1 : 0.5,
+                    }}
+                  >
+                    {COLOR_MODE_LABEL[mode]}
+                  </button>
+                );
+              })}
+              {colorMode !== 'priority' && (
+                <div className="flex items-center gap-1 mt-1 text-[10px] text-gray-400">
+                  <span>0</span>
+                  <div className="flex-1 h-1.5 rounded" style={{
+                    background: 'linear-gradient(to right, #1e3a5f, #2563eb, #f97316, #ef4444, #7f1d1d)',
+                  }} />
+                  <span>100</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {wellsTab === 'flags' && (
+            <div className="flex flex-col gap-1">
+              {(rsFlags.size > 0 || orphansOnly) && (
+                <button
+                  onClick={() => { setRsFlags(new Set()); setOrphansOnly(false); }}
+                  className="self-end text-[10px] text-gray-400 hover:text-white -mb-0.5"
+                  title="Clear all flag filters"
+                >
+                  clear
+                </button>
+              )}
+              {(Object.keys(RS_FLAG_LABEL) as RsFlag[]).map(flag => {
+                const active = rsFlags.has(flag);
+                const color = RS_FLAG_COLOR[flag];
+                return (
+                  <button
+                    key={flag}
+                    onClick={() => setRsFlags(prev => {
+                      const next = new Set(prev);
+                      if (next.has(flag)) next.delete(flag);
+                      else next.add(flag);
+                      return next;
+                    })}
+                    className="px-2 py-1 rounded text-xs font-medium transition-opacity text-left"
+                    style={{
+                      backgroundColor: active ? color : 'transparent',
+                      color: active ? '#000' : color,
+                      border: `1px solid ${color}`,
+                      opacity: active ? 1 : 0.5,
+                    }}
+                  >
+                    {RS_FLAG_LABEL[flag]}
+                  </button>
+                );
+              })}
+              {rsFlags.has('veg') && (
+                <p className="text-[10px] text-gray-500 mt-1 leading-tight">
+                  Surface-anomaly run is partial — ~5K of 131K wells analyzed.
+                </p>
+              )}
+              {rsFlags.size > 0 && filters.includes('critical') && (
+                <p className="text-[10px] text-red-400 mt-1 leading-tight">
+                  Critical wells stay visible regardless of flag filters.
+                </p>
+              )}
+
+              {/* Hard filter — visually separated from RS flags since it's a
+                  status filter (not a remote-sensing signal) and AND's onto
+                  every priority tier including critical. */}
+              <div className="border-t border-white/10 mt-1 pt-1.5">
+                <button
+                  onClick={() => setOrphansOnly(prev => !prev)}
+                  className="w-full flex items-center justify-between px-2 py-1 rounded text-xs font-medium transition-opacity text-left"
+                  style={{
+                    backgroundColor: orphansOnly ? '#fb7185' : 'transparent',
+                    color:           orphansOnly ? '#000'    : '#fb7185',
+                    border:          '1px solid #fb7185',
+                    opacity:         orphansOnly ? 1 : 0.5,
+                  }}
+                  title="Keep only wells whose operator_status is historic_owner or orphan_program (~50K of 131K)"
+                >
+                  <span>Orphans only</span>
+                  <span className="text-[10px] opacity-70">
+                    {orphansOnly ? '50K' : ''}
+                  </span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {wellsTab === 'land' && (
+            <div className="flex flex-col gap-1">
+              {landCoverFilter !== 'all' && (
+                <button
+                  onClick={resetLandCover}
+                  className="self-end text-[10px] text-gray-400 hover:text-white -mb-0.5"
+                  title="Show all land-cover classes"
+                >
+                  reset
+                </button>
+              )}
+              <div className="grid grid-cols-2 gap-1">
+                {LAND_COVER_CODES.map(code => {
+                  const active = landCoverFilter === 'all' || landCoverFilter.has(code);
+                  const color  = LAND_COVER_COLOR[code];
+                  return (
+                    <button
+                      key={code}
+                      onClick={() => toggleLandCover(code)}
+                      className="px-1.5 py-1 rounded text-[11px] font-medium transition-opacity text-left capitalize truncate"
+                      style={{
+                        backgroundColor: active ? color : 'transparent',
+                        color: active ? '#000' : color,
+                        border: `1px solid ${color}`,
+                        opacity: active ? 1 : 0.5,
+                      }}
+                      title={LAND_COVER_LABEL[code]}
+                    >
+                      {LAND_COVER_LABEL[code]}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* County choropleth metric */}
-        <div className="flex flex-col gap-1 bg-black/70 rounded p-2 border border-white/10">
+        {/* ── LAYERS card — overlay toggles + county metric picker ────────── */}
+        <div className="flex flex-col bg-black/70 rounded p-2 border border-white/10 w-52">
+          <span className="text-xs text-gray-400 uppercase tracking-wider mb-1.5">Layers</span>
+
+          {/* Counties — toggle on/off, expose metric picker only when on */}
           <button
             onClick={() => setShowCounties(prev => !prev)}
-            className="flex items-center justify-between text-xs uppercase tracking-wider mb-1 font-medium w-full"
-            style={{ color: showCounties ? '#fff' : '#6b7280' }}
+            className="flex items-center justify-between text-xs py-0.5"
+            style={{ color: showCounties ? '#a78bfa' : '#9ca3af' }}
           >
-            <span>County boundaries</span>
-            <span className="ml-2">{showCounties ? '●' : '○'}</span>
+            <span>Counties</span>
+            <span>{showCounties ? '●' : '○'}</span>
           </button>
-          {showCounties && (Object.keys(COUNTY_METRIC_LABELS) as CountyMetric[]).map(m => {
-            const active = countyMetric === m;
-            const color = m === 'avg_risk_score'  ? '#a78bfa'
-              : m === 'critical_count'  ? PRIORITY_COLOR.critical
-              : m === 'high_count'      ? PRIORITY_COLOR.high
-              : m === 'medium_count'    ? PRIORITY_COLOR.medium
-              : m === 'annual_co2e_mt'  ? '#f59e0b'
-              : PRIORITY_COLOR.low;
-            return (
-              <button
-                key={m}
-                onClick={() => setCountyMetric(m)}
-                className="px-2 py-1 rounded text-xs font-medium text-left transition-opacity"
-                style={{
-                  backgroundColor: active ? color : 'transparent',
-                  color: active ? '#000' : color,
-                  border: `1px solid ${color}`,
-                  opacity: active ? 1 : 0.5,
-                }}
-              >
-                {COUNTY_METRIC_LABELS[m]}
-              </button>
-            );
-          })}
-        </div>
+          {showCounties && (
+            <div className="grid grid-cols-2 gap-1 mt-1 mb-2">
+              {(Object.keys(COUNTY_METRIC_LABELS) as CountyMetric[]).map(m => {
+                const active = countyMetric === m;
+                const color = m === 'avg_risk_score'  ? '#a78bfa'
+                  : m === 'critical_count'  ? PRIORITY_COLOR.critical
+                  : m === 'high_count'      ? PRIORITY_COLOR.high
+                  : m === 'medium_count'    ? PRIORITY_COLOR.medium
+                  : m === 'annual_co2e_mt'  ? '#f59e0b'
+                  : PRIORITY_COLOR.low;
+                return (
+                  <button
+                    key={m}
+                    onClick={() => setCountyMetric(m)}
+                    className="px-1.5 py-0.5 rounded text-[10px] font-medium transition-opacity text-left truncate"
+                    style={{
+                      backgroundColor: active ? color : 'transparent',
+                      color: active ? '#000' : color,
+                      border: `1px solid ${color}`,
+                      opacity: active ? 1 : 0.5,
+                    }}
+                  >
+                    {COUNTY_METRIC_LABELS[m]}
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
-        {/* Water zones toggle */}
-        <div className="flex flex-col gap-1 bg-black/70 rounded p-2 border border-white/10">
+          {/* Water zones */}
           <button
             onClick={() => setShowWaterSources(prev => !prev)}
-            className="flex items-center justify-between text-xs uppercase tracking-wider"
-            style={{ color: showWaterSources ? '#0891b2' : '#6b7280' }}
+            className="flex items-center justify-between text-xs py-0.5"
+            style={{ color: showWaterSources ? '#0891b2' : '#9ca3af' }}
           >
-            <span>Water Zones</span>
-            <span className="ml-3">{showWaterSources ? '●' : '○'}</span>
+            <span>Water zones</span>
+            <span>{showWaterSources ? '●' : '○'}</span>
           </button>
           {showWaterSources && !waterSourcesLoaded && (
-            <p className="text-xs text-gray-500 mt-1">Loading…</p>
+            <p className="text-[10px] text-gray-500 pl-1 -mt-0.5">Loading…</p>
+          )}
+
+          {/* CH4 plumes */}
+          <button
+            onClick={() => setShowPlumes(prev => !prev)}
+            className="flex items-center justify-between text-xs py-0.5"
+            style={{ color: showPlumes ? '#f59e0b' : '#9ca3af' }}
+          >
+            <span>CH₄ plumes</span>
+            <span>{showPlumes ? '●' : '○'}</span>
+          </button>
+          {showPlumes && !plumesLoaded && (
+            <p className="text-[10px] text-gray-500 pl-1 -mt-0.5">Loading…</p>
+          )}
+          {showPlumes && plumesLoaded && (
+            <p className="text-[10px] text-gray-500 pl-1 -mt-0.5 leading-tight">
+              Dot size = flux (log scale)
+            </p>
           )}
         </div>
       </div>
 
       {hoverInfo && (
         <div
-          className="absolute pointer-events-none z-20 bg-gray-900/95 border border-gray-600 rounded px-2.5 py-1.5 text-xs shadow-lg"
+          className="absolute pointer-events-none z-20 bg-gray-900/95 border border-gray-600 rounded px-3 py-2 text-xs shadow-lg"
           style={{ left: hoverInfo.x + 12, top: hoverInfo.y - 14 }}
         >
-          <span style={{ color: PRIORITY_COLOR[hoverInfo.priority], fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            {hoverInfo.priority}
-          </span>
-          {hoverInfo.risk_score != null && (
-            <span className="text-gray-400 ml-2 font-mono">{hoverInfo.risk_score.toFixed(1)}</span>
-          )}
+          <div className="font-mono text-gray-300 mb-1">{hoverInfo.api_no}</div>
+          <div className="flex items-center gap-2 mb-1">
+            <span style={{ color: PRIORITY_COLOR[hoverInfo.priority], fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              {hoverInfo.priority}
+            </span>
+            {hoverInfo.risk_score != null && (
+              <span className="text-gray-400 font-mono">{hoverInfo.risk_score.toFixed(1)}</span>
+            )}
+          </div>
+          {colorMode !== 'priority' && (() => {
+            const score = colorMode === 'emissions' ? hoverInfo.emissions_risk_score
+                        : colorMode === 'vegetation' ? hoverInfo.vegetation_risk_score
+                        : hoverInfo.terrain_risk_score;
+            return (
+              <div className="text-gray-400 mb-0.5">
+                {COLOR_MODE_LABEL[colorMode]}: <span className="text-white font-mono">{score != null ? score.toFixed(0) : '—'}</span>
+              </div>
+            );
+          })()}
+          <div className="text-gray-400">{hoverInfo.county}</div>
         </div>
       )}
 
@@ -723,7 +1209,7 @@ async function loadWells(
   while (true) {
     const { data, error } = await supabase
       .from('well_map_view')
-      .select('api_no, lat, lng, priority, risk_score')
+      .select('api_no, lat, lng, priority, risk_score, land_cover, emissions_risk_score, vegetation_risk_score, terrain_risk_score, ch4_is_anomaly, ch4_signal_source, is_artificially_flat, veg_anomaly_detected, cluster_neighbor_count, operator_status')
       .in('priority', priorities)
       .range(page * PAGE, (page + 1) * PAGE - 1);
 
@@ -734,7 +1220,22 @@ async function loadWells(
       allFeatures.push({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [row.lng, row.lat] },
-        properties: { api_no: row.api_no, priority: row.priority, risk_score: row.risk_score },
+        properties: {
+          api_no:                row.api_no,
+          priority:              row.priority,
+          risk_score:            row.risk_score,
+          land_cover:            row.land_cover ?? null,
+          emissions_risk_score:  row.emissions_risk_score ?? null,
+          vegetation_risk_score: row.vegetation_risk_score ?? null,
+          terrain_risk_score:    row.terrain_risk_score ?? null,
+          ch4_is_anomaly:        row.ch4_is_anomaly ?? false,
+          ch4_signal_source:     row.ch4_signal_source ?? '',
+          is_artificially_flat:    row.is_artificially_flat ?? false,
+          veg_anomaly_detected:    row.veg_anomaly_detected ?? false,
+          cluster_neighbor_count:  row.cluster_neighbor_count ?? 0,
+          operator_status:         row.operator_status ?? '',
+          county:                  '',
+        },
       });
     }
 
@@ -791,12 +1292,30 @@ async function fetchWellDetail(api_no: string): Promise<WellDetail | null> {
     water_risk_score:         data.water_risk_score,
     population_risk_score:    data.population_risk_score,
     inactivity_score:         data.inactivity_score,
+    emissions_risk_score:     data.emissions_risk_score ?? null,
+    vegetation_risk_score:    data.vegetation_risk_score ?? null,
+    terrain_risk_score:       data.terrain_risk_score ?? null,
+    composite_risk_score:     data.composite_risk_score ?? null,
     nearest_water_distance_m: data.nearest_water_distance_m,
     within_protection_zone:   data.within_protection_zone,
     operator_status:          data.operator_status,
     population_within_1km:    data.population_within_1km,
     population_within_5km:    data.population_within_5km,
     years_inactive:           data.years_inactive,
+    land_cover:               data.land_cover ?? null,
+    ch4_is_anomaly:           data.ch4_is_anomaly ?? null,
+    ch4_signal_source:        data.ch4_signal_source ?? null,
+    ch4_well_ppb:             data.ch4_well_ppb ?? null,
+    ch4_background_ppb:       data.ch4_background_ppb ?? null,
+    ch4_anomaly_ratio:        data.ch4_anomaly_ratio ?? null,
+    thermal_anomaly_c:        data.thermal_anomaly_c ?? null,
+    is_artificially_flat:     data.is_artificially_flat ?? null,
+    slope_ratio:              data.slope_ratio ?? null,
+    veg_anomaly_detected:     data.veg_anomaly_detected ?? null,
+    veg_anomaly_type:         data.veg_anomaly_type ?? null,
+    ndvi_relative:            data.ndvi_relative ?? null,
+    ndvi_trend_slope:         data.ndvi_trend_slope ?? null,
+    cluster_neighbor_count:   data.cluster_neighbor_count ?? null,
     well: {
       well_name: data.well_name,
       county:    data.county,
@@ -807,4 +1326,17 @@ async function fetchWellDetail(api_no: string): Promise<WellDetail | null> {
       lng:       data.lng,
     },
   } as WellDetail;
+}
+
+async function loadPlumes(m: mapboxgl.Map): Promise<boolean> {
+  try {
+    const res = await fetch('/api/methane-plumes');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const geojson: GeoJSON.FeatureCollection = await res.json();
+    (m.getSource('methane-plumes') as mapboxgl.GeoJSONSource)?.setData(geojson);
+    return true;
+  } catch (err) {
+    console.error('[methane-plumes]', err);
+    return false;
+  }
 }
