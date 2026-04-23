@@ -505,6 +505,7 @@ async function fetchWellByApiNo(api_no: string): Promise<WellDetail | null> {
     ndvi_relative:            data.ndvi_relative ?? null,
     ndvi_trend_slope:         data.ndvi_trend_slope ?? null,
     cluster_neighbor_count:   data.cluster_neighbor_count ?? null,
+    last_nonzero_production_year: data.last_nonzero_production_year ?? null,
     well: {
       well_name: data.well_name,
       county:    data.county,
@@ -657,7 +658,17 @@ export default function WellSidebar({ well, selectedCounty, filters, onFilterCha
             <Row label="Well type"    value={well.well?.well_type} />
             <Row label="Operator"     value={well.well?.operator} />
             <Row label="Oper. status" value={well.operator_status} highlight={well.operator_status === 'historic_owner'} />
-            <Row label="Years inactive" value={well.years_inactive != null ? `${well.years_inactive} yrs` : 'Unknown'} />
+            <Row label="Years inactive" value={
+              // Producing wells carry a 1-2 year "years_inactive" reporting lag
+              // because last_nonzero_production_year is annual-resolution and
+              // RBDMS production reports trail calendar time. Override for
+              // clarity and surface the last-report year so the lag is legible.
+              well.well?.status === 'Producing'
+                ? (well.last_nonzero_production_year != null
+                    ? `Currently producing (last report ${well.last_nonzero_production_year})`
+                    : 'Currently producing')
+                : well.years_inactive != null ? `${well.years_inactive} yrs` : 'Unknown'
+            } />
             <Row label="Water distance" value={well.nearest_water_distance_m != null
               ? `${(well.nearest_water_distance_m / 1000).toFixed(1)} km` : '—'} />
             <Row label="In zone"      value={well.within_protection_zone ? 'Yes' : 'No'}

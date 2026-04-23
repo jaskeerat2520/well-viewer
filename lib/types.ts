@@ -84,6 +84,9 @@ export interface WellDetail {
   // Spatial cluster: how many other wells sit within 10-30m (signal of an
   // old infill pad or orphan cluster — strong plugging-consolidation candidate)
   cluster_neighbor_count: number | null;
+  // Last year the well reported nonzero production to RBDMS. Annual-resolution
+  // so Producing wells can lag 1-2 years behind calendar time.
+  last_nonzero_production_year: number | null;
   well: {
     well_name: string | null;
     county: string;

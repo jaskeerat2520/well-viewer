@@ -1316,6 +1316,7 @@ async function fetchWellDetail(api_no: string): Promise<WellDetail | null> {
     ndvi_relative:            data.ndvi_relative ?? null,
     ndvi_trend_slope:         data.ndvi_trend_slope ?? null,
     cluster_neighbor_count:   data.cluster_neighbor_count ?? null,
+    last_nonzero_production_year: data.last_nonzero_production_year ?? null,
     well: {
       well_name: data.well_name,
       county:    data.county,
