@@ -1,8 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
-import { WellDetail, Priority, PRIORITY_COLOR, CountySummary, NearYouResult, LAND_COVER_LABEL, LAND_COVER_COLOR, LandCoverCode, CH4_SOURCE_COLOR, CH4_SOURCE_LABEL } from '@/lib/types';
+import { WellDetail, Priority, PRIORITY_COLOR, CountySummary, NearYouResult, LAND_COVER_LABEL, LAND_COVER_COLOR, LandCoverCode, CH4_SOURCE_COLOR, CH4_SOURCE_LABEL, ADMIN_STATUS_LABEL, ADMIN_STATUS_COLOR, AdminStatus } from '@/lib/types';
+import { formatDistanceUS, metersToFeet, RADIUS_1KM, RADIUS_5KM, RADIUS_10M, RADIUS_30M } from '@/lib/units';
 
 // ── Satellite types ────────────────────────────────────────────────────────────
 interface ThumbPair { baseline_url?: string | null; recent_url?: string | null; }
@@ -67,7 +69,7 @@ function ThumbPairView({
       >
         Load before/after imagery ↗
       </button>
-      <p className="text-xs text-gray-600 mt-1.5 text-center">Sentinel-2 10m · 2016 vs 2023–24 via GEE</p>
+      <p className="text-xs text-gray-600 mt-1.5 text-center">Sentinel-2 33 ft/px · 2016 vs 2023–24 via GEE</p>
     </div>
   );
 
@@ -400,16 +402,12 @@ function SatellitePanel({ lat, lng }: { lat: number; lng: number }) {
 interface Props {
   well: WellDetail | null;
   selectedCounty: CountySummary | null;
-  filters: Priority[];
-  onFilterChange: (p: Priority) => void;
   onClose: () => void;
   onCloseCounty: () => void;
   nearYouResult: NearYouResult | null;
   onClearNearYou: () => void;
   onSelectWell: (well: WellDetail | null) => void;
 }
-
-const PRIORITIES: Priority[] = ['critical', 'high', 'medium', 'low'];
 
 function ScoreBar({ label, value }: { label: string; value: number | null }) {
   const pct = value ?? 0;
@@ -437,17 +435,28 @@ function ImpactCallout({ well }: { well: WellDetail }) {
   if (well.within_protection_zone) {
     points.push({ text: 'Inside a drinking water protection zone — contamination could affect the public water supply', color: 'text-blue-400' });
   } else if (well.nearest_water_distance_m != null && well.nearest_water_distance_m < 500) {
-    const m = Math.round(well.nearest_water_distance_m);
-    points.push({ text: `${m}m from a drinking water source — closer than most city blocks`, color: 'text-blue-400' });
+    const ft = Math.round(metersToFeet(well.nearest_water_distance_m));
+    points.push({ text: `${ft.toLocaleString()} ft from a drinking water source — closer than most city blocks`, color: 'text-blue-400' });
   }
   if (well.population_within_1km != null && well.population_within_1km > 1000) {
-    points.push({ text: `~${well.population_within_1km.toLocaleString()} people live within 1km of this well`, color: 'text-gray-300' });
+    points.push({ text: `~${well.population_within_1km.toLocaleString()} people live within ${RADIUS_1KM} of this well`, color: 'text-gray-300' });
   }
   if (well.years_inactive != null && well.years_inactive > 30) {
     points.push({ text: `Dormant for ${well.years_inactive} years — longer than most Ohioans have been alive`, color: 'text-gray-400' });
   }
   if (well.operator_status === 'orphan_program' || well.operator_status === 'historic_owner') {
     points.push({ text: 'No responsible owner — plugging costs fall to Ohio taxpayers', color: 'text-orange-400' });
+  }
+  // Zombie / paperwork producers: labeled "Producing" but haven't actually
+  // produced in years (or ever). These are hidden orphans the state hasn't
+  // formally recognized — surfaced by the admin_status classifier.
+  if (well.admin_status === 'zombie_producer' || well.admin_status === 'paperwork_producer') {
+    points.push({
+      text: well.admin_status === 'zombie_producer'
+        ? 'Labeled "Producing" but no production since before 2015 — hidden orphan candidate'
+        : 'Labeled "Producing" with no production history on record — likely paperwork-only',
+      color: 'text-rose-400',
+    });
   }
 
   if (points.length === 0) return null;
@@ -488,6 +497,7 @@ async function fetchWellByApiNo(api_no: string): Promise<WellDetail | null> {
     nearest_water_distance_m: data.nearest_water_distance_m,
     within_protection_zone:   data.within_protection_zone,
     operator_status:          data.operator_status,
+    admin_status:             data.admin_status ?? null,
     population_within_1km:    data.population_within_1km,
     population_within_5km:    data.population_within_5km,
     years_inactive:           data.years_inactive,
@@ -506,6 +516,11 @@ async function fetchWellByApiNo(api_no: string): Promise<WellDetail | null> {
     ndvi_trend_slope:         data.ndvi_trend_slope ?? null,
     cluster_neighbor_count:   data.cluster_neighbor_count ?? null,
     last_nonzero_production_year: data.last_nonzero_production_year ?? null,
+    surface_owner_name:           data.surface_owner_name ?? null,
+    surface_owner_mailing_state:  data.surface_owner_mailing_state ?? null,
+    surface_parcel_id:            data.surface_parcel_id ?? null,
+    historical_mineral_lessor:    data.historical_mineral_lessor ?? null,
+    is_severed_estate:            data.is_severed_estate ?? null,
     well: {
       well_name: data.well_name,
       county:    data.county,
@@ -563,42 +578,37 @@ function ApiLookup({ onSelectWell }: { onSelectWell: (w: WellDetail | null) => v
   );
 }
 
-export default function WellSidebar({ well, selectedCounty, filters, onFilterChange, onClose, onCloseCounty, nearYouResult, onClearNearYou, onSelectWell }: Props) {
+export default function WellSidebar({ well, selectedCounty, onClose, onCloseCounty, nearYouResult, onClearNearYou, onSelectWell }: Props) {
   return (
     <div className="w-80 bg-gray-900 text-white flex flex-col h-full border-l border-gray-700">
-
-      {/* Filter toggles — always visible */}
-      <div className="p-4 border-b border-gray-700">
-        <p className="text-xs text-gray-400 uppercase tracking-wider mb-2">Show priorities</p>
-        <div className="flex gap-2 flex-wrap">
-          {PRIORITIES.map(p => (
-            <button
-              key={p}
-              onClick={() => onFilterChange(p)}
-              className="px-3 py-1 rounded-full text-xs font-medium border transition-opacity"
-              style={{
-                borderColor: PRIORITY_COLOR[p],
-                color: filters.includes(p) ? '#000' : PRIORITY_COLOR[p],
-                backgroundColor: filters.includes(p) ? PRIORITY_COLOR[p] : 'transparent',
-                opacity: filters.includes(p) ? 1 : 0.5,
-              }}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
-      </div>
 
       {/* Well detail — shown when a well is selected */}
       {well ? (
         <div className="flex-1 overflow-y-auto p-4">
           <div className="flex justify-between items-start mb-4">
             <div>
-              <p className="text-xs text-gray-400 mb-0.5">{well.well?.county} COUNTY</p>
+              <p className="text-xs text-gray-400 mb-0.5">
+                {well.well?.county ? (
+                  <Link
+                    href={`/counties/${encodeURIComponent(well.well.county)}`}
+                    className="hover:text-white transition-colors"
+                  >
+                    {well.well.county} COUNTY →
+                  </Link>
+                ) : 'UNKNOWN COUNTY'}
+              </p>
               <h2 className="text-base font-semibold leading-tight">
                 {well.well?.well_name ?? well.api_no}
               </h2>
-              <p className="text-xs text-gray-400 mt-0.5">{well.api_no}</p>
+              <p className="text-xs text-gray-400 mt-0.5">
+                <Link
+                  href={`/wells/${encodeURIComponent(well.api_no)}`}
+                  className="hover:text-white transition-colors underline-offset-2 hover:underline"
+                  title="Open full well detail page"
+                >
+                  {well.api_no} →
+                </Link>
+              </p>
             </div>
             <button onClick={onClose} className="text-gray-500 hover:text-white ml-2 text-lg leading-none">✕</button>
           </div>
@@ -650,14 +660,35 @@ export default function WellSidebar({ well, selectedCounty, filters, onFilterCha
           {/* Remote-sensing detail */}
           <RemoteSensingSection well={well} />
 
+          {/* Landowner & mineral-rights detail (compact sidebar version) */}
+          <LandownerSection well={well} />
+
           {/* Well metadata */}
           <div className="space-y-2 text-sm">
             <p className="text-xs text-gray-400 uppercase tracking-wider mb-2">Details</p>
             <Row label="Coordinates" value={well.well?.lat && well.well?.lng ? `${well.well.lat.toFixed(5)}, ${well.well.lng.toFixed(5)}` : '—'} />
             <Row label="Status"       value={well.well?.status} />
             <Row label="Well type"    value={well.well?.well_type} />
-            <Row label="Operator"     value={well.well?.operator} />
+            <Row label="Operator"     value={well.well?.operator ? (
+              <Link
+                href={`/operators/${encodeURIComponent(well.well.operator)}`}
+                className="text-white hover:text-blue-300 underline-offset-2 hover:underline"
+              >
+                {well.well.operator}
+              </Link>
+            ) : '—'} />
             <Row label="Oper. status" value={well.operator_status} highlight={well.operator_status === 'historic_owner'} />
+            <Row
+              label="Admin status"
+              value={well.admin_status
+                ? (ADMIN_STATUS_LABEL[well.admin_status as AdminStatus] ?? well.admin_status)
+                : '—'}
+              color={well.admin_status ? (ADMIN_STATUS_COLOR[well.admin_status as AdminStatus] ?? undefined) : undefined}
+              highlight={well.admin_status === 'zombie_producer'
+                      || well.admin_status === 'paperwork_producer'
+                      || well.admin_status === 'orphan_official'
+                      || well.admin_status === 'orphan_program'}
+            />
             <Row label="Years inactive" value={
               // Producing wells carry a 1-2 year "years_inactive" reporting lag
               // because last_nonzero_production_year is annual-resolution and
@@ -669,12 +700,11 @@ export default function WellSidebar({ well, selectedCounty, filters, onFilterCha
                     : 'Currently producing')
                 : well.years_inactive != null ? `${well.years_inactive} yrs` : 'Unknown'
             } />
-            <Row label="Water distance" value={well.nearest_water_distance_m != null
-              ? `${(well.nearest_water_distance_m / 1000).toFixed(1)} km` : '—'} />
+            <Row label="Water distance" value={formatDistanceUS(well.nearest_water_distance_m)} />
             <Row label="In zone"      value={well.within_protection_zone ? 'Yes' : 'No'}
               highlight={well.within_protection_zone} />
-            <Row label="Pop within 1km" value={well.population_within_1km?.toLocaleString() ?? '—'} />
-            <Row label="Pop within 5km" value={well.population_within_5km?.toLocaleString() ?? '—'} />
+            <Row label={`Pop within ${RADIUS_1KM}`} value={well.population_within_1km?.toLocaleString() ?? '—'} />
+            <Row label={`Pop within ${RADIUS_5KM}`} value={well.population_within_5km?.toLocaleString() ?? '—'} />
           </div>
 
           {/* Live satellite analysis */}
@@ -698,13 +728,65 @@ export default function WellSidebar({ well, selectedCounty, filters, onFilterCha
   );
 }
 
-function Row({ label, value, highlight }: { label: string; value?: string | number | null; highlight?: boolean }) {
+function Row({ label, value, highlight, color }: { label: string; value?: React.ReactNode; highlight?: boolean; color?: string }) {
+  // `color` overrides the default/highlight class. Used for per-category color
+  // coding (e.g. admin_status) where the hex comes from a lookup map.
   return (
     <div className="flex justify-between gap-2">
       <span className="text-gray-400 shrink-0">{label}</span>
-      <span className={`text-right truncate ${highlight ? 'text-orange-400' : 'text-white'}`}>
+      <span
+        className={`text-right truncate ${color ? '' : (highlight ? 'text-orange-400' : 'text-white')}`}
+        style={color ? { color } : undefined}
+      >
         {value ?? '—'}
       </span>
+    </div>
+  );
+}
+
+// Compact landowner + mineral-rights surface for the sidebar. Renders only when
+// at least one of the four signals (parcel id, surface owner, mailing state,
+// historical lessor) is present — otherwise the section would be all dashes.
+// The detail page has the full version; this is a one-glance summary.
+function LandownerSection({ well }: { well: WellDetail }) {
+  const hasSurface  = well.surface_owner_name || well.surface_parcel_id || well.surface_owner_mailing_state;
+  const hasMineral  = well.historical_mineral_lessor || well.is_severed_estate != null;
+  if (!hasSurface && !hasMineral) return null;
+
+  return (
+    <div className="mb-4">
+      <p className="text-xs text-gray-400 uppercase tracking-wider mb-2">Landowner</p>
+      {hasSurface && (
+        <div className="space-y-1 text-sm mb-2">
+          {well.surface_owner_name && (
+            <Row label="Surface owner" value={well.surface_owner_name} />
+          )}
+          {well.surface_parcel_id && (
+            <Row label="Parcel" value={<span className="font-mono text-xs">{well.surface_parcel_id}</span>} />
+          )}
+          {well.surface_owner_mailing_state && (
+            <Row
+              label="Owner mails to"
+              value={well.surface_owner_mailing_state}
+              highlight={well.surface_owner_mailing_state !== 'OH'}
+            />
+          )}
+        </div>
+      )}
+      {hasMineral && (
+        <div className="space-y-1 text-sm">
+          {well.historical_mineral_lessor && (
+            <Row label="Mineral lessor" value={well.historical_mineral_lessor} />
+          )}
+          {well.is_severed_estate != null && (
+            <Row
+              label="Estate"
+              value={well.is_severed_estate ? 'Severed' : 'United'}
+              highlight={well.is_severed_estate}
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -809,11 +891,11 @@ function RemoteSensingSection({ well }: { well: WellDetail }) {
             <span
               className="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold"
               style={{ backgroundColor: '#ec4899', color: '#000' }}
-              title="Number of other wells whose centroid is 10–30 m away"
+              title={`Number of other wells whose centroid is ${RADIUS_10M}–${RADIUS_30M} away`}
             >
               {well.cluster_neighbor_count === 1
-                ? '1 neighbor 10–30m'
-                : `${well.cluster_neighbor_count} neighbors 10–30m`}
+                ? `1 neighbor ${RADIUS_10M}–${RADIUS_30M}`
+                : `${well.cluster_neighbor_count} neighbors ${RADIUS_10M}–${RADIUS_30M}`}
             </span>
             {well.cluster_neighbor_count >= 5 && (
               <span className="text-[10px] text-pink-300 font-semibold uppercase tracking-wider">

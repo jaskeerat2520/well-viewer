@@ -1,5 +1,59 @@
 export type Priority = 'critical' | 'high' | 'medium' | 'low';
 
+// Operational classification from the `well_admin_status` view. Extends
+// operator_status with categories that distinguish zombie producers,
+// paperwork producers, and other operationally-meaningful states.
+// Rules live in the SQL view; this union mirrors the outputs of that CASE.
+export type AdminStatus =
+  | 'orphan_program'
+  | 'orphan_official'
+  | 'historic_owner'
+  | 'well_extinct'
+  | 'permit_expired'
+  | 'permit_cancelled'
+  | 'status_unknown'
+  | 'drilled_never_produced'
+  | 'paperwork_producer'
+  | 'zombie_producer'
+  | 'named_operator'
+  | 'unknown';
+
+export const ADMIN_STATUS_LABEL: Record<AdminStatus, string> = {
+  orphan_program:          'Orphan Program',
+  orphan_official:          'Orphan (Official)',
+  historic_owner:           'Historic Owner',
+  well_extinct:             'Well Not Found',
+  permit_expired:           'Permit Expired',
+  permit_cancelled:         'Permit Cancelled',
+  status_unknown:           'Status Unknown',
+  drilled_never_produced:   'Drilled, No Production',
+  paperwork_producer:       'No Production Filed',
+  zombie_producer:          'Producing, No Recent Output',
+  named_operator:           'Named Operator',
+  unknown:                  'Unknown',
+};
+
+// Color palette groups categories by action-implication:
+//   red/rose  — hidden orphans (including the newly-surfaced zombie/paperwork)
+//   orange    — DNR-recognized legacy
+//   amber     — drilled but administratively stalled
+//   green     — genuinely active operator
+//   gray      — lost records / physically extinct / edge cases
+export const ADMIN_STATUS_COLOR: Record<AdminStatus, string> = {
+  orphan_program:          '#ef4444',  // red-500
+  orphan_official:         '#dc2626',  // red-600
+  historic_owner:          '#f97316',  // orange-500
+  paperwork_producer:      '#ec4899',  // pink-500  — hidden orphan (named Producing, no prod history)
+  zombie_producer:         '#f43f5e',  // rose-500  — hidden orphan (named Producing, stale prod)
+  permit_expired:          '#eab308',  // yellow-500 — real drilled wellbore with lapsed permit
+  drilled_never_produced:  '#d97706',  // amber-600 — drilled, no production, aged out
+  permit_cancelled:        '#a3a3a3',  // neutral-400 — edge case (ghosts excluded upstream)
+  status_unknown:          '#6b7280',  // gray-500 — DNR lost track
+  well_extinct:            '#525252',  // neutral-600 — physically gone
+  named_operator:          '#22c55e',  // green-500 — active, regulated
+  unknown:                 '#6b7280',  // gray-500
+};
+
 export interface WellPoint {
   api_no: string;
   lat: number;
@@ -62,6 +116,7 @@ export interface WellDetail {
   nearest_water_distance_m: number;
   within_protection_zone: boolean;
   operator_status: string;
+  admin_status: AdminStatus | string | null;
   population_within_1km: number;
   population_within_5km: number;
   years_inactive: number | null;
@@ -87,6 +142,17 @@ export interface WellDetail {
   // Last year the well reported nonzero production to RBDMS. Annual-resolution
   // so Producing wells can lag 1-2 years behind calendar time.
   last_nonzero_production_year: number | null;
+  // Surface landowner + historical mineral-rights metadata. NULL where parcels
+  // haven't been ingested for the well's county, or where wells.lease_name was
+  // empty. surface_owner_name additionally NULL outside Hocking until per-county
+  // auditor pulls happen — OGRIP statewide carries mailing addresses but not
+  // owner names. is_severed_estate requires both sides; only computed where both
+  // surface_owner_name and historical_mineral_lessor are present.
+  surface_owner_name: string | null;
+  surface_owner_mailing_state: string | null;
+  surface_parcel_id: string | null;
+  historical_mineral_lessor: string | null;
+  is_severed_estate: boolean | null;
   well: {
     well_name: string | null;
     county: string;

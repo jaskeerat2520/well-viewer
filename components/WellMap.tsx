@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { supabase } from '@/lib/supabase';
+import { loadCachedWells, saveCachedWells, clearCachedWells } from '@/lib/wellsCache';
 import { WellDetail, Priority, PRIORITY_COLOR, CountySummary, WATER_SOURCE_COLOR, NearYouResult, LandCoverCode, LAND_COVER_LABEL, LAND_COVER_COLOR } from '@/lib/types';
 
 type ColorMode = 'priority' | 'emissions' | 'vegetation' | 'terrain';
@@ -40,7 +41,7 @@ const RS_FLAG_LABEL: Record<RsFlag, string> = {
   plume:   'Near plume',
   veg:     'Vegetation loss',
   flat:    'Artificially flat',
-  cluster: 'Clustered (≥2 neighbors 10–30m)',
+  cluster: 'Clustered (≥2 neighbors 33–100 ft)',
 };
 
 const RS_FLAG_COLOR: Record<RsFlag, string> = {
@@ -59,14 +60,55 @@ const RS_FLAG_EXPR: Record<RsFlag, mapboxgl.Expression> = {
   cluster: ['>=', ['coalesce', ['get', 'cluster_neighbor_count'], 0], 2],
 };
 
-type WellsTab = 'priority' | 'color' | 'flags' | 'land';
+type WellsTab = 'priority' | 'activity' | 'color' | 'flags' | 'land';
 
 const WELLS_TABS: { key: WellsTab; label: string }[] = [
   { key: 'priority', label: 'Priority' },
+  { key: 'activity', label: 'Activity' },
   { key: 'color',    label: 'Color'    },
   { key: 'flags',    label: 'Flags'    },
   { key: 'land',     label: 'Land'     },
 ];
+
+// ── Activity classification (matches the 6-way buckets on detail pages,
+// minus "Plugged" since plugged wells aren't in well_map_view).
+type ActivityLevel = 'active' | 'aging' | 'zombie' | 'paperwork' | 'other';
+
+const ACTIVITY_LEVELS: ActivityLevel[] = ['active', 'aging', 'zombie', 'paperwork', 'other'];
+
+const ACTIVITY_LABEL: Record<ActivityLevel, string> = {
+  active:    'Producing (2020+)',
+  aging:     'Producing (2015–19)',
+  zombie:    'Producing (<2015)',
+  paperwork: 'No production filed',
+  other:     'Non-producing',
+};
+
+const ACTIVITY_COLOR: Record<ActivityLevel, string> = {
+  active:    '#9ca3af',
+  aging:     '#eab308',
+  zombie:    '#f97316',
+  paperwork: '#f43f5e',
+  other:     '#6b7280',
+};
+
+const ACTIVITY_HINT: Record<ActivityLevel, string> = {
+  active:    'Producing · last prod ≥ 2020',
+  aging:     'Producing · last prod 2015–2019',
+  zombie:    'Producing · last prod before 2015',
+  paperwork: 'Producing · zero production on record',
+  other:     'Non-producing (permit, inspection, FI WNF, …)',
+};
+
+function classifyActivity(status: string | null, lastProd: number | null): ActivityLevel {
+  if (status === 'Producing') {
+    if (lastProd == null) return 'paperwork';
+    if (lastProd >= 2020) return 'active';
+    if (lastProd >= 2015) return 'aging';
+    return 'zombie';
+  }
+  return 'other';
+}
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
 
@@ -149,11 +191,12 @@ interface Props {
   onFilterChange: (p: Priority) => void;
   onSelectWell: (well: WellDetail | null) => void;
   onSelectCounty: (county: CountySummary | null) => void;
+  selectedCounty: CountySummary | null;
   onNearYouResult: (result: NearYouResult | null) => void;
   centerOn?: { lat: number; lng: number } | null;
 }
 
-export default function WellMap({ filters, onFilterChange, onSelectWell, onSelectCounty, onNearYouResult, centerOn }: Props) {
+export default function WellMap({ filters, onFilterChange, onSelectWell, onSelectCounty, selectedCounty, onNearYouResult, centerOn }: Props) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const [loadStatus, setLoadStatus] = useState('Loading critical wells…');
@@ -167,8 +210,15 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
   const [waterSourcesLoaded, setWaterSourcesLoaded] = useState(false);
   const [showPlumes, setShowPlumes] = useState(false);
   const [plumesLoaded, setPlumesLoaded] = useState(false);
+  const [showPadCandidates, setShowPadCandidates] = useState(false);
+  const [padCandidatesLoaded, setPadCandidatesLoaded] = useState(false);
+  const [showParcels, setShowParcels] = useState(false);
+  const [parcelsLoading, setParcelsLoading] = useState(false);
   const [colorMode, setColorMode] = useState<ColorMode>('priority');
   const [rsFlags, setRsFlags] = useState<Set<RsFlag>>(new Set());
+  const [activityFilters, setActivityFilters] = useState<Set<ActivityLevel>>(
+    new Set<ActivityLevel>(ACTIVITY_LEVELS)
+  );
   const [wellsTab, setWellsTab] = useState<WellsTab>('priority');
   // Hard filter (AND'd onto every priority tier): exclude wells that have a
   // named active operator — i.e. keep only historic_owner + orphan_program.
@@ -217,13 +267,15 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
         url: 'mapbox://mapbox.satellite',
         tileSize: 256,
       });
-      // Ohio OSIP — 1ft resolution state aerial, best available year per county
+      // Ohio OSIP — most-current statewide aerial mosaic (mix of 6-inch and 1ft
+      // depending on the cycle each county was last flown). Served as a fused
+      // map cache in Web Mercator, so it slots straight in as a Mapbox raster source.
       m.addSource('osip-satellite', {
         type: 'raster',
-        tiles: ['https://geo.oit.ohio.gov/arcgis/rest/services/OSIP/osip_best_avail_1ft/ImageServer/tile/{z}/{y}/{x}'],
+        tiles: ['https://maps.ohio.gov/image/rest/services/osip_most_current_cache/MapServer/tile/{z}/{y}/{x}'],
         tileSize: 256,
-        attribution: '© Ohio OIT / OGRIP — Ohio Statewide Imagery Program',
-        minzoom: 7,   // OSIP tiles only exist at county-level zoom and above
+        attribution: '© Ohio OIT / OGRIP — Ohio Statewide Imagery Program (OSIP)',
+        minzoom: 7,   // cache only covers Ohio; lower zooms would 404
       });
       m.addLayer({
         id: 'bing-layer',
@@ -327,6 +379,34 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
           },
         });
 
+        // Highlight outline for the currently selected county. Filter starts
+        // matching nothing (sentinel fips); the selectedCounty effect swaps
+        // the filter when the user picks a county.
+        // Glow layer (rendered first, sits below the crisp line)
+        m.addLayer({
+          id: 'counties-selected-glow',
+          type: 'line',
+          source: 'counties',
+          filter: ['==', 'fips_code', '__none__'],
+          paint: {
+            'line-color': '#facc15',
+            'line-opacity': 0.45,
+            'line-width': ['interpolate', ['linear'], ['zoom'], 5, 6, 10, 12, 14, 18],
+            'line-blur': 6,
+          },
+        });
+        m.addLayer({
+          id: 'counties-selected-outline',
+          type: 'line',
+          source: 'counties',
+          filter: ['==', 'fips_code', '__none__'],
+          paint: {
+            'line-color': '#facc15',
+            'line-opacity': 1,
+            'line-width': ['interpolate', ['linear'], ['zoom'], 5, 2, 10, 4, 14, 5],
+          },
+        });
+
         m.on('click', 'counties-fill', (e) => {
           // Mapbox fires click events independently for every layer intersecting
           // the click point, and e.originalEvent.stopPropagation() stops only
@@ -336,7 +416,7 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
           // more zoomed in. Guard by checking for higher-priority features at
           // the same point; if any exist, defer to their handlers.
           const topHits = m.queryRenderedFeatures(e.point, {
-            layers: ['methane-plumes-dot', 'wells-critical', 'wells-high', 'wells-medium', 'wells-low'],
+            layers: ['methane-plumes-dot', 'pad-candidates-dot', 'wells-critical', 'wells-high', 'wells-medium', 'wells-low', 'parcels-fill'],
           });
           if (topHits.length > 0) return;
 
@@ -504,6 +584,161 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
       m.on('mouseenter', 'methane-plumes-dot', () => { m.getCanvas().style.cursor = 'pointer'; });
       m.on('mouseleave', 'methane-plumes-dot', () => { m.getCanvas().style.cursor = ''; });
 
+      // ── Pad-detection candidates (NAIP NDVI + OSIP edge, pad_score >= 30) ──
+      // Review queue, NOT a composite contributor. ~60% precision at the
+      // strong (>=50) bin; humans triage. Switch to OSIP basemap to verify.
+      m.addSource('pad-candidates', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+
+      m.addLayer({
+        id: 'pad-candidates-glow',
+        type: 'circle',
+        source: 'pad-candidates',
+        layout: { visibility: 'none' },
+        paint: {
+          'circle-color': [
+            'interpolate', ['linear'], ['get', 'pad_score'],
+            30, '#c4b5fd',
+            50, '#8b5cf6',
+            70, '#6d28d9',
+          ],
+          'circle-radius': [
+            'interpolate', ['linear'], ['zoom'],
+            6,  10,
+            10, 22,
+            13, 38,
+          ],
+          'circle-opacity': 0.25,
+          'circle-blur': 1.1,
+        },
+      });
+
+      m.addLayer({
+        id: 'pad-candidates-dot',
+        type: 'circle',
+        source: 'pad-candidates',
+        layout: { visibility: 'none' },
+        paint: {
+          'circle-color': [
+            'interpolate', ['linear'], ['get', 'pad_score'],
+            30, '#c4b5fd',
+            50, '#8b5cf6',
+            70, '#6d28d9',
+          ],
+          'circle-radius': [
+            'interpolate', ['linear'], ['zoom'],
+            6,  ['interpolate', ['linear'], ['get', 'pad_score'], 30, 3, 50, 5, 70, 7],
+            11, ['interpolate', ['linear'], ['get', 'pad_score'], 30, 6, 50, 10, 70, 14],
+          ],
+          'circle-stroke-width': 1.5,
+          'circle-stroke-color': '#000',
+          'circle-opacity': 0.95,
+        },
+      });
+
+      m.on('click', 'pad-candidates-dot', (e) => {
+        const props = e.features?.[0]?.properties;
+        if (!props) return;
+        const fmt = (v: unknown, d = 3) => {
+          const n = Number(v);
+          return isFinite(n) ? n.toFixed(d) : '—';
+        };
+        const signals: string[] = [];
+        if (Number(props.abs_signal)   > 0) signals.push(`abs +${props.abs_signal}`);
+        if (Number(props.delta_signal) > 0) signals.push(`delta +${props.delta_signal}`);
+        if (Number(props.edge_signal)  > 0) signals.push(`edge +${props.edge_signal}`);
+        const lcCode = Number(props.land_cover);
+        const lcLabel = isFinite(lcCode) && lcCode in LAND_COVER_LABEL
+          ? LAND_COVER_LABEL[lcCode as LandCoverCode] : '—';
+        const masked = isFinite(Number(props.pad_score_raw)) &&
+                       Number(props.pad_score) < Number(props.pad_score_raw);
+        const maskNote = masked
+          ? `<div style="color:#fbbf24;margin-top:4px">WorldCover masked: raw was ${props.pad_score_raw}</div>`
+          : '';
+        new mapboxgl.Popup({ maxWidth: '300px' })
+          .setLngLat(e.lngLat)
+          .setHTML(`
+            <div style="font-size:12px">
+              <div style="font-weight:600;margin-bottom:4px">
+                Pad candidate · score ${props.pad_score}
+              </div>
+              <div style="color:#9ca3af">API: <span style="color:#fff">${props.api_no}</span></div>
+              <div style="color:#9ca3af">Operator: <span style="color:#fff">${props.operator ?? '—'}</span></div>
+              <div style="color:#9ca3af">Status: <span style="color:#fff">${props.well_status ?? '—'}</span></div>
+              <div style="color:#9ca3af">Land cover: <span style="color:#fff">${lcLabel}</span></div>
+              <div style="color:#9ca3af;margin-top:4px">Signals: <span style="color:#fff">${signals.join(' · ') || 'none'}</span></div>
+              <div style="color:#9ca3af">NAIP pad NDVI: <span style="color:#fff">${fmt(props.naip_ndvi_pad)}</span></div>
+              <div style="color:#9ca3af">NAIP delta: <span style="color:#fff">${fmt(props.naip_delta)}</span></div>
+              <div style="color:#9ca3af">OSIP edge ratio: <span style="color:#fff">${fmt(props.edge_ratio, 2)}</span></div>
+              <div style="color:#9ca3af;margin-top:4px">Composite risk: <span style="color:#fff">${fmt(props.composite_risk, 1)} (${props.composite_priority ?? '—'})</span></div>
+              ${maskNote}
+            </div>
+          `)
+          .addTo(m);
+        e.originalEvent.stopPropagation();
+      });
+      m.on('mouseenter', 'pad-candidates-dot', () => { m.getCanvas().style.cursor = 'pointer'; });
+      m.on('mouseleave', 'pad-candidates-dot', () => { m.getCanvas().style.cursor = ''; });
+
+      // ── Surface parcels (statewide, viewport-loaded) ─────────────────────
+      // 5.8M+ parcels, so we fetch only what's in the current bbox via
+      // /api/parcels?bbox=… and refetch on moveend. Gated to zoom 9+ since
+      // parcels render as invisible specks at smaller scales anyway.
+      m.addSource('parcels', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+
+      m.addLayer({
+        id: 'parcels-fill',
+        type: 'fill',
+        source: 'parcels',
+        minzoom: 9,
+        layout: { visibility: 'none' },
+        paint: { 'fill-color': '#facc15', 'fill-opacity': 0.10 },
+      });
+
+      m.addLayer({
+        id: 'parcels-outline',
+        type: 'line',
+        source: 'parcels',
+        minzoom: 9,
+        layout: { visibility: 'none' },
+        paint: {
+          'line-color': '#facc15',
+          'line-opacity': ['interpolate', ['linear'], ['zoom'], 9, 0.35, 14, 0.75],
+          'line-width':   ['interpolate', ['linear'], ['zoom'], 9, 0.4,  14, 1.2],
+        },
+      });
+
+      m.on('click', 'parcels-fill', (e) => {
+        // Defer to higher-priority features (wells, plumes) at the same point.
+        const topHits = m.queryRenderedFeatures(e.point, {
+          layers: ['methane-plumes-dot', 'pad-candidates-dot', 'wells-critical', 'wells-high', 'wells-medium', 'wells-low'],
+        });
+        if (topHits.length > 0) return;
+        const props = e.features?.[0]?.properties;
+        if (!props) return;
+        const acres = props.acreage != null ? Number(props.acreage).toFixed(2) : '—';
+        new mapboxgl.Popup({ maxWidth: '260px' })
+          .setLngLat(e.lngLat)
+          .setHTML(`
+            <div style="font-size:12px">
+              <div style="font-weight:600;margin-bottom:4px">${props.owner_name ?? 'Unknown owner'}</div>
+              <div style="color:#9ca3af">Parcel: <span style="color:#fff;font-family:monospace">${props.parcel_id ?? '—'}</span></div>
+              <div style="color:#9ca3af">Acreage: <span style="color:#fff">${acres}</span></div>
+              <div style="color:#9ca3af">County: <span style="color:#fff">${props.county ?? '—'}</span></div>
+              ${props.land_use_code ? `<div style="color:#9ca3af">Land use: <span style="color:#fff">${props.land_use_code}</span></div>` : ''}
+            </div>
+          `)
+          .addTo(m);
+        e.originalEvent.stopPropagation();
+      });
+      m.on('mouseenter', 'parcels-fill', () => { m.getCanvas().style.cursor = 'pointer'; });
+      m.on('mouseleave', 'parcels-fill', () => { m.getCanvas().style.cursor = ''; });
+
       // ── Wells source + layers (on top of counties) ───────────────────────
       // Add empty source first — we'll populate it progressively
       m.addSource('wells', {
@@ -600,18 +835,29 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
         onSelectCounty(null);
       });
 
-      // Load in strict priority order — a combined `IN ('critical', 'high')`
-      // query returns rows in DB-scan order, so critical dots wait behind
-      // hundreds of high rows before the first render. Fetching critical
-      // alone puts the 39 dots on the map within one round trip.
-      const allFeatures: GeoJSON.Feature[] = [];
-      setLoadStatus('Loading critical wells…');
-      await loadWells(['critical'], m, allFeatures, setLoadStatus);
-      setLoadStatus('Loading high-priority wells…');
-      await loadWells(['high'], m, allFeatures, setLoadStatus);
-      setLoadStatus('Loading remaining wells…');
-      await loadWells(['medium', 'low'], m, allFeatures, setLoadStatus);
-      setLoadStatus('');
+      // Try the persistent cache first — survives navigation and hard reload.
+      // On hit, paint everything in one go. On miss, fall through to the
+      // 3-phase fetch and persist the union at the end.
+      const cached = await loadCachedWells();
+      if (cached && cached.length > 0) {
+        const source = m.getSource('wells') as mapboxgl.GeoJSONSource | undefined;
+        if (source) source.setData({ type: 'FeatureCollection', features: cached });
+        setLoadStatus('');
+      } else {
+        // Load in strict priority order — a combined `IN ('critical', 'high')`
+        // query returns rows in DB-scan order, so critical dots wait behind
+        // hundreds of high rows before the first render. Fetching critical
+        // alone puts the 39 dots on the map within one round trip.
+        const allFeatures: GeoJSON.Feature[] = [];
+        setLoadStatus('Loading critical wells…');
+        await loadWells(['critical'], m, allFeatures, setLoadStatus);
+        setLoadStatus('Loading high-priority wells…');
+        await loadWells(['high'], m, allFeatures, setLoadStatus);
+        setLoadStatus('Loading remaining wells…');
+        await loadWells(['medium', 'low'], m, allFeatures, setLoadStatus);
+        setLoadStatus('');
+        await saveCachedWells(allFeatures);
+      }
     });
 
     return () => { map.current?.remove(); map.current = null; };
@@ -655,6 +901,13 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
       ? ['!=', ['get', 'operator_status'], 'named_operator']
       : null;
 
+    // Activity filter (AND'd onto every tier). When all levels are selected we
+    // skip the expression so the filter is a no-op — no runtime cost in Mapbox.
+    const activityExpr: mapboxgl.Expression | null =
+      activityFilters.size === ACTIVITY_LEVELS.length
+        ? null
+        : ['in', ['get', 'activity'], ['literal', Array.from(activityFilters)]];
+
     PRIORITY_ORDER.forEach(priority => {
       const base: mapboxgl.Expression = ['==', ['get', 'priority'], priority];
       const parts: mapboxgl.Expression[] = [base];
@@ -666,6 +919,7 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
       // ignores RS flags and stays visible whenever its priority filter is on.
       if (flagExpr && priority !== 'critical') parts.push(flagExpr);
       if (orphanExpr) parts.push(orphanExpr);
+      if (activityExpr) parts.push(activityExpr);
       const combined: mapboxgl.Expression =
         parts.length === 1 ? parts[0] : (['all', ...parts] as mapboxgl.Expression);
       const layerId = `wells-${priority}`;
@@ -673,7 +927,7 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
       if (map.current!.getLayer(layerId)) map.current!.setFilter(layerId, combined);
       if (map.current!.getLayer(glowId))  map.current!.setFilter(glowId,  combined);
     });
-  }, [landCoverFilter, rsFlags, orphansOnly]);
+  }, [landCoverFilter, rsFlags, orphansOnly, activityFilters]);
 
   // Dot recolors by selected RS score; glow stays pinned to PRIORITY_COLOR so
   // critical/high tiers remain recognizable even when most of their dots would
@@ -702,6 +956,17 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
       loadPlumes(map.current).then(ok => { if (ok) setPlumesLoaded(true); });
     }
   }, [showPlumes, plumesLoaded]);
+
+  // Toggle pad-detection candidates + lazy-load on first show
+  useEffect(() => {
+    if (!map.current?.getLayer('pad-candidates-dot')) return;
+    const vis = showPadCandidates ? 'visible' : 'none';
+    map.current.setLayoutProperty('pad-candidates-dot',  'visibility', vis);
+    map.current.setLayoutProperty('pad-candidates-glow', 'visibility', vis);
+    if (showPadCandidates && !padCandidatesLoaded) {
+      loadPadCandidates(map.current).then(ok => { if (ok) setPadCandidatesLoaded(true); });
+    }
+  }, [showPadCandidates, padCandidatesLoaded]);
 
   function toggleLandCover(code: LandCoverCode) {
     setLandCoverFilter(prev => {
@@ -738,6 +1003,8 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
     const vis = showCounties ? 'visible' : 'none';
     map.current.setLayoutProperty('counties-fill', 'visibility', vis);
     map.current.setLayoutProperty('counties-line', 'visibility', vis);
+    map.current.setLayoutProperty('counties-selected-glow',    'visibility', vis);
+    map.current.setLayoutProperty('counties-selected-outline', 'visibility', vis);
   }, [showCounties]);
 
   // Toggle water source layer visibility + lazy-load data on first show
@@ -750,6 +1017,70 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
       loadWaterSources(map.current).then(ok => { if (ok) setWaterSourcesLoaded(true); });
     }
   }, [showWaterSources, waterSourcesLoaded]);
+
+  // Highlight the currently selected county with a bright outline + glow.
+  // Use legacy filter syntax (['==', 'prop', value]) for broadest compat.
+  useEffect(() => {
+    const m = map.current;
+    if (!m?.getLayer('counties-selected-outline')) return;
+    const fips = selectedCounty?.fips_code ?? '__none__';
+    m.setFilter('counties-selected-outline', ['==', 'fips_code', fips]);
+    m.setFilter('counties-selected-glow',    ['==', 'fips_code', fips]);
+  }, [selectedCounty?.fips_code]);
+
+  // Parcels: 5.8M+ statewide. Two modes:
+  //   • County selected → ONE fetch of all parcels for that county. No
+  //     refetch on pan/zoom — the whole county sits in the source until
+  //     the user picks a different county. Mirrors how Hocking-only used
+  //     to behave.
+  //   • No county selected → bbox fetch with debounced refetch on pan/zoom
+  //     so the user can still see context if they explore raw.
+  useEffect(() => {
+    const m = map.current;
+    if (!m?.getLayer('parcels-fill')) return;
+    const vis = showParcels ? 'visible' : 'none';
+    m.setLayoutProperty('parcels-fill',    'visibility', vis);
+    m.setLayoutProperty('parcels-outline', 'visibility', vis);
+
+    if (!showParcels) {
+      (m.getSource('parcels') as mapboxgl.GeoJSONSource | undefined)?.setData({
+        type: 'FeatureCollection', features: [],
+      });
+      setParcelsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    if (selectedCounty?.county) {
+      setParcelsLoading(true);
+      loadParcelsByCounty(m, selectedCounty.county)
+        .finally(() => { if (!cancelled) setParcelsLoading(false); });
+      return () => { cancelled = true; };
+    }
+
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const refetch = () => {
+      if (cancelled) return;
+      if (m.getZoom() < 9) return;
+      setParcelsLoading(true);
+      loadParcelsByBbox(m).finally(() => { if (!cancelled) setParcelsLoading(false); });
+    };
+    const onMove = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(refetch, 250);
+    };
+    refetch();
+    m.on('moveend', onMove);
+    m.on('zoomend', onMove);
+    return () => {
+      cancelled = true;
+      if (debounceTimer) clearTimeout(debounceTimer);
+      m.off('moveend', onMove);
+      m.off('zoomend', onMove);
+    };
+  }, [showParcels, selectedCounty?.county]);
+
 
   // Recolor county choropleth when metric changes
   useEffect(() => {
@@ -885,11 +1216,11 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
             borderColor:      satellite !== 'off' ? '#ccc' : 'rgba(255,255,255,0.3)',
           }}
         >
-          🛰 {satellite === 'bing' ? 'Bing (Vexcel)' : satellite === 'esri' ? 'Esri imagery' : satellite === 'mapbox' ? 'Mapbox imagery' : satellite === 'osip' ? 'Ohio OSIP (1ft)' : 'Satellite'}
+          🛰 {satellite === 'bing' ? 'Bing (Vexcel)' : satellite === 'esri' ? 'Esri imagery' : satellite === 'mapbox' ? 'Mapbox imagery' : satellite === 'osip' ? 'Ohio OSIP (current)' : 'Satellite'}
         </button>
 
         {/* ── WELLS card (tabbed) ───────────────────────────────────────── */}
-        <div className="flex flex-col gap-1 bg-black/70 rounded p-2 border border-white/10 w-52">
+        <div className="flex flex-col gap-1 bg-black/70 rounded p-2 border border-white/10 w-56">
           <div className="flex gap-0.5 mb-1 bg-black/60 rounded p-0.5">
             {WELLS_TABS.map(t => {
               const active = wellsTab === t.key;
@@ -897,6 +1228,7 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
               // user can tell at a glance that a hidden filter is active.
               const dirty =
                 (t.key === 'priority' && filters.length < PRIORITY_ORDER.length) ||
+                (t.key === 'activity' && activityFilters.size < ACTIVITY_LEVELS.length) ||
                 (t.key === 'color'    && colorMode !== 'priority') ||
                 (t.key === 'flags'    && (rsFlags.size > 0 || orphansOnly)) ||
                 (t.key === 'land'     && landCoverFilter !== 'all');
@@ -904,7 +1236,7 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
                 <button
                   key={t.key}
                   onClick={() => setWellsTab(t.key)}
-                  className="relative flex-1 px-1 py-1 rounded text-[10px] font-semibold uppercase tracking-wider transition-colors"
+                  className="relative flex-1 min-w-0 px-1 py-1 rounded text-[10px] font-semibold capitalize transition-colors truncate"
                   style={{
                     backgroundColor: active ? '#fff' : 'transparent',
                     color: active ? '#000' : '#9ca3af',
@@ -939,6 +1271,48 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
                   </button>
                 );
               })}
+            </div>
+          )}
+
+          {wellsTab === 'activity' && (
+            <div className="flex flex-col gap-1">
+              {activityFilters.size < ACTIVITY_LEVELS.length && (
+                <button
+                  onClick={() => setActivityFilters(new Set(ACTIVITY_LEVELS))}
+                  className="self-end text-[10px] text-gray-400 hover:text-white -mb-0.5"
+                  title="Reset activity filter"
+                >
+                  reset
+                </button>
+              )}
+              {ACTIVITY_LEVELS.map(a => {
+                const active = activityFilters.has(a);
+                const color = ACTIVITY_COLOR[a];
+                return (
+                  <button
+                    key={a}
+                    onClick={() => setActivityFilters(prev => {
+                      const next = new Set(prev);
+                      if (next.has(a)) next.delete(a);
+                      else next.add(a);
+                      return next;
+                    })}
+                    title={ACTIVITY_HINT[a]}
+                    className="px-2 py-1 rounded text-xs font-medium transition-opacity text-left"
+                    style={{
+                      backgroundColor: active ? color : 'transparent',
+                      color: active ? '#000' : color,
+                      border: `1px solid ${color}`,
+                      opacity: active ? 1 : 0.5,
+                    }}
+                  >
+                    {ACTIVITY_LABEL[a]}
+                  </button>
+                );
+              })}
+              <p className="text-[10px] text-gray-500 mt-1 leading-tight">
+                Filters by production recency. Hover a chip for the rule.
+              </p>
             </div>
           )}
 
@@ -1083,7 +1457,7 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
         </div>
 
         {/* ── LAYERS card — overlay toggles + county metric picker ────────── */}
-        <div className="flex flex-col bg-black/70 rounded p-2 border border-white/10 w-52">
+        <div className="flex flex-col bg-black/70 rounded p-2 border border-white/10 w-56">
           <span className="text-xs text-gray-400 uppercase tracking-wider mb-1.5">Layers</span>
 
           {/* Counties — toggle on/off, expose metric picker only when on */}
@@ -1154,6 +1528,44 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
               Dot size = flux (log scale)
             </p>
           )}
+
+          {/* Surface parcels — statewide, viewport-loaded at zoom ≥ 9 */}
+          <button
+            onClick={() => setShowParcels(prev => !prev)}
+            className="flex items-center justify-between text-xs py-0.5"
+            style={{ color: showParcels ? '#facc15' : '#9ca3af' }}
+          >
+            <span>Surface parcels</span>
+            <span>{showParcels ? '●' : '○'}</span>
+          </button>
+          {showParcels && parcelsLoading && (
+            <p className="text-[10px] text-gray-500 pl-1 -mt-0.5">Loading…</p>
+          )}
+          {showParcels && !parcelsLoading && (
+            <p className="text-[10px] text-gray-500 pl-1 -mt-0.5 leading-tight">
+              {selectedCounty?.county
+                ? `Showing ${selectedCounty.county}`
+                : 'Click a county or zoom in'}
+            </p>
+          )}
+
+          {/* Pad-detection candidates — review queue (~60% precision at strong bin) */}
+          <button
+            onClick={() => setShowPadCandidates(prev => !prev)}
+            className="flex items-center justify-between text-xs py-0.5"
+            style={{ color: showPadCandidates ? '#a78bfa' : '#9ca3af' }}
+          >
+            <span>Pad candidates</span>
+            <span>{showPadCandidates ? '●' : '○'}</span>
+          </button>
+          {showPadCandidates && !padCandidatesLoaded && (
+            <p className="text-[10px] text-gray-500 pl-1 -mt-0.5">Loading…</p>
+          )}
+          {showPadCandidates && padCandidatesLoaded && (
+            <p className="text-[10px] text-gray-500 pl-1 -mt-0.5 leading-tight">
+              pad_score &ge; 30 · purple = stronger · click for signals
+            </p>
+          )}
         </div>
       </div>
 
@@ -1190,6 +1602,14 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
           {loadStatus}
         </div>
       )}
+
+      <button
+        onClick={async () => { await clearCachedWells(); window.location.reload(); }}
+        title="Clear local cache and re-fetch wells from Supabase"
+        className="absolute bottom-2 right-2 z-20 bg-gray-900/80 hover:bg-gray-800 text-gray-400 hover:text-white text-[10px] px-2 py-1 rounded border border-gray-700"
+      >
+        ↻ Refresh data
+      </button>
     </div>
   );
 }
@@ -1209,7 +1629,7 @@ async function loadWells(
   while (true) {
     const { data, error } = await supabase
       .from('well_map_view')
-      .select('api_no, lat, lng, priority, risk_score, land_cover, emissions_risk_score, vegetation_risk_score, terrain_risk_score, ch4_is_anomaly, ch4_signal_source, is_artificially_flat, veg_anomaly_detected, cluster_neighbor_count, operator_status')
+      .select('api_no, lat, lng, priority, risk_score, land_cover, emissions_risk_score, vegetation_risk_score, terrain_risk_score, ch4_is_anomaly, ch4_signal_source, is_artificially_flat, veg_anomaly_detected, cluster_neighbor_count, operator_status, admin_status, status, last_nonzero_production_year')
       .in('priority', priorities)
       .range(page * PAGE, (page + 1) * PAGE - 1);
 
@@ -1234,6 +1654,8 @@ async function loadWells(
           veg_anomaly_detected:    row.veg_anomaly_detected ?? false,
           cluster_neighbor_count:  row.cluster_neighbor_count ?? 0,
           operator_status:         row.operator_status ?? '',
+          admin_status:            row.admin_status ?? '',
+          activity:                classifyActivity(row.status ?? null, row.last_nonzero_production_year ?? null),
           county:                  '',
         },
       });
@@ -1259,6 +1681,35 @@ async function loadWaterSources(m: mapboxgl.Map): Promise<boolean> {
     return true;
   } catch (err) {
     console.error('[water-sources]', err);
+    return false;
+  }
+}
+
+async function loadParcelsByBbox(m: mapboxgl.Map): Promise<boolean> {
+  try {
+    const b = m.getBounds();
+    if (!b) return false;
+    const bbox = `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
+    const res = await fetch(`/api/parcels?bbox=${encodeURIComponent(bbox)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const geojson: GeoJSON.FeatureCollection = await res.json();
+    (m.getSource('parcels') as mapboxgl.GeoJSONSource)?.setData(geojson);
+    return true;
+  } catch (err) {
+    console.error('[parcels:bbox]', err);
+    return false;
+  }
+}
+
+async function loadParcelsByCounty(m: mapboxgl.Map, county: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/parcels?county=${encodeURIComponent(county)}&limit=100000`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const geojson: GeoJSON.FeatureCollection = await res.json();
+    (m.getSource('parcels') as mapboxgl.GeoJSONSource)?.setData(geojson);
+    return true;
+  } catch (err) {
+    console.error('[parcels:county]', err);
     return false;
   }
 }
@@ -1338,6 +1789,19 @@ async function loadPlumes(m: mapboxgl.Map): Promise<boolean> {
     return true;
   } catch (err) {
     console.error('[methane-plumes]', err);
+    return false;
+  }
+}
+
+async function loadPadCandidates(m: mapboxgl.Map): Promise<boolean> {
+  try {
+    const res = await fetch('/api/pad-candidates');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const geojson: GeoJSON.FeatureCollection = await res.json();
+    (m.getSource('pad-candidates') as mapboxgl.GeoJSONSource)?.setData(geojson);
+    return true;
+  } catch (err) {
+    console.error('[pad-candidates]', err);
     return false;
   }
 }

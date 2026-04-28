@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
+import SiteHeader from '@/components/SiteHeader';
 
 // 32 ARC Appalachian Ohio counties
 const ARC_COUNTIES = new Set([
@@ -147,26 +148,12 @@ export default function CountiesPage() {
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-white">
 
-      {/* ── Header ─────────────────────────────────────────────────────── */}
-      <header className="flex items-center justify-between px-5 py-3 bg-gray-900 border-b border-gray-700 shrink-0">
-        <div className="flex items-center gap-4">
-          <h1 className="text-sm font-semibold tracking-tight">Ohio Well Data — County Summary</h1>
-          {!loading && (
-            <span className="text-xs text-gray-500">
-              {filtered.length} of 88 counties
-              {appalachianOnly ? ' · Appalachian' : ''}
-            </span>
-          )}
-        </div>
-        <nav className="flex items-center gap-4">
-          <Link href="/about"    className="text-xs text-gray-400 hover:text-white transition-colors">About</Link>
-          <Link href="/"         className="text-xs text-gray-400 hover:text-white transition-colors">← Map</Link>
-          <Link href="/table"    className="text-xs text-gray-400 hover:text-white transition-colors">Table</Link>
-          <Link href="/facts"    className="text-xs text-gray-400 hover:text-white transition-colors">Facts</Link>
-          <Link href="/impact"   className="text-xs text-gray-400 hover:text-white transition-colors">Impact</Link>
-          <Link href="/emissions" className="text-xs text-gray-400 hover:text-white transition-colors">Emissions →</Link>
-        </nav>
-      </header>
+      <SiteHeader
+        title="Counties"
+        leftExtra={!loading && (
+          <span>{filtered.length} of 88 counties{appalachianOnly ? ' · Appalachian' : ''}</span>
+        )}
+      />
 
       {/* ── Filter bar ─────────────────────────────────────────────────── */}
       <div className="flex items-center gap-3 px-4 py-2 bg-gray-900 border-b border-gray-700 shrink-0">
@@ -237,7 +224,12 @@ export default function CountiesPage() {
                   </td>
                   {/* County name */}
                   <td className="px-3 py-1 font-medium whitespace-nowrap">
-                    {titleCase(row.county)}
+                    <Link
+                      href={`/counties/${encodeURIComponent(row.county)}`}
+                      className="text-gray-200 hover:text-white hover:underline transition-colors"
+                    >
+                      {titleCase(row.county)}
+                    </Link>
                   </td>
                   {COLS.map(col => (
                     <td key={col.key} className="px-2 py-1 font-mono text-right whitespace-nowrap">

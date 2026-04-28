@@ -4,7 +4,14 @@ import { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
 import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabase';
-import { Priority, PRIORITY_COLOR } from '@/lib/types';
+import { getCached, setCached } from '@/lib/idbCache';
+import { Priority, PRIORITY_COLOR, ADMIN_STATUS_LABEL, ADMIN_STATUS_COLOR, AdminStatus } from '@/lib/types';
+import { formatDistanceUS, metersToMiles, RADIUS_1KM, RADIUS_5KM } from '@/lib/units';
+import SiteHeader from '@/components/SiteHeader';
+
+const TABLE_VERSION = 1;
+const STATUSES_VERSION = 1;
+const TTL_24H = 24 * 60 * 60 * 1000;
 
 const PAGE_SIZE = 100;
 const PRIORITIES: Priority[] = ['critical', 'high', 'medium', 'low'];
@@ -56,6 +63,7 @@ interface WellTableRow {
   nearest_water_distance_m: number | null;
   within_protection_zone: boolean | null;
   operator_status: string | null;
+  admin_status: string | null;
   population_within_1km: number | null;
   population_within_5km: number | null;
   years_inactive: number | null;
@@ -77,9 +85,14 @@ export default function TablePage() {
   const [search, setSearch]                         = useState('');
   const [debouncedSearch, setDebouncedSearch]       = useState('');
   const [countyFilter, setCountyFilter]             = useState('');
+  const [countyQuery, setCountyQuery]               = useState('');
+  const [countyOpen, setCountyOpen]                 = useState(false);
   const [priorityFilter, setPriorityFilter]         = useState<Priority[]>([]);
   const [statusFilter, setStatusFilter]             = useState('');
   const [operatorStatusFilter, setOperatorStatusFilter] = useState('');
+  const [adminStatusFilter, setAdminStatusFilter]       = useState('');
+  const [lastProdFilter, setLastProdFilter]             = useState('');     // 'never' | 'before_2000' | '2000_2014' | '2015_2019' | '2020_plus'
+  const [yearsInactiveFilter, setYearsInactiveFilter]   = useState('');     // 'under_5' | 'over_5' | 'over_20' | 'over_50'
   const [appalachianOnly, setAppalachianOnly]       = useState(false);
 
   // Sort
@@ -101,34 +114,70 @@ export default function TablePage() {
     }, 350);
   }
 
-  // Fetch county + status lists once on mount
+  // Fetch county + status lists once on mount (cached — these change rarely)
   useEffect(() => {
-    supabase
-      .from('county_summary')
-      .select('county')
-      .not('county', 'is', null)
-      .order('county')
-      .then(({ data }) => {
-        if (data) setCounties(data.map(r => r.county as string));
-      });
-
-    supabase
-      .from('wells')
-      .select('status')
-      .not('status', 'is', null)
-      .then(({ data }) => {
-        if (data) {
-          const unique = [...new Set(data.map(r => r.status as string))].sort();
-          setStatuses(unique);
-        }
-      });
+    let cancelled = false;
+    async function loadCounties() {
+      const cached = await getCached<string[]>('table:counties_list', STATUSES_VERSION, TTL_24H);
+      if (cancelled) return;
+      if (cached) { setCounties(cached); return; }
+      const { data } = await supabase
+        .from('county_summary')
+        .select('county')
+        .not('county', 'is', null)
+        .order('county');
+      if (cancelled || !data) return;
+      const list = data.map(r => r.county as string);
+      setCounties(list);
+      await setCached('table:counties_list', STATUSES_VERSION, list);
+    }
+    async function loadStatuses() {
+      const cached = await getCached<string[]>('table:statuses_list', STATUSES_VERSION, TTL_24H);
+      if (cancelled) return;
+      if (cached) { setStatuses(cached); return; }
+      const { data } = await supabase
+        .from('wells')
+        .select('status')
+        .not('status', 'is', null);
+      if (cancelled || !data) return;
+      const unique = [...new Set(data.map(r => r.status as string))].sort();
+      setStatuses(unique);
+      await setCached('table:statuses_list', STATUSES_VERSION, unique);
+    }
+    loadCounties();
+    loadStatuses();
+    return () => { cancelled = true; };
   }, []);
 
   // Fetch paginated/filtered/sorted data
   useEffect(() => {
     let cancelled = false;
+    const cacheKey = 'table:rows:' + JSON.stringify({
+      q:   debouncedSearch,
+      c:   countyFilter,
+      arc: appalachianOnly,
+      pri: [...priorityFilter].sort(),
+      st:  statusFilter,
+      op:  operatorStatusFilter,
+      ad:  adminStatusFilter,
+      lp:  lastProdFilter,
+      yi:  yearsInactiveFilter,
+      s:   sortCol,
+      sd:  sortDir,
+      p:   page,
+    });
+
     async function fetchData() {
       setLoading(true);
+
+      const cached = await getCached<{ rows: WellTableRow[]; total: number }>(cacheKey, TABLE_VERSION, TTL_24H);
+      if (cancelled) return;
+      if (cached) {
+        setRows(cached.rows);
+        setTotal(cached.total);
+        setLoading(false);
+        return;
+      }
 
       let query = supabase
         .from('well_table_view')
@@ -138,7 +187,7 @@ export default function TablePage() {
           'last_nonzero_production_year,last_active_year,last_active_source,' +
           'priority,risk_score,water_risk_score,' +
           'population_risk_score,inactivity_score,nearest_water_distance_m,' +
-          'within_protection_zone,operator_status,population_within_1km,' +
+          'within_protection_zone,operator_status,admin_status,population_within_1km,' +
           'population_within_5km,years_inactive',
           { count: 'exact' }
         );
@@ -153,6 +202,20 @@ export default function TablePage() {
       if (priorityFilter.length) query = query.in('priority', priorityFilter);
       if (statusFilter)          query = query.eq('status', statusFilter);
       if (operatorStatusFilter)  query = query.eq('operator_status', operatorStatusFilter);
+      if (adminStatusFilter)     query = query.eq('admin_status', adminStatusFilter);
+
+      // Last-produced calendar buckets — `never` = NULL last_nonzero_production_year.
+      if (lastProdFilter === 'never')        query = query.is('last_nonzero_production_year', null);
+      else if (lastProdFilter === 'before_2000') query = query.lt('last_nonzero_production_year', 2000);
+      else if (lastProdFilter === '2000_2014')   query = query.gte('last_nonzero_production_year', 2000).lt('last_nonzero_production_year', 2015);
+      else if (lastProdFilter === '2015_2019')   query = query.gte('last_nonzero_production_year', 2015).lt('last_nonzero_production_year', 2020);
+      else if (lastProdFilter === '2020_plus')   query = query.gte('last_nonzero_production_year', 2020);
+
+      // Years-inactive duration buckets.
+      if (yearsInactiveFilter === 'under_5')      query = query.lt('years_inactive', 5);
+      else if (yearsInactiveFilter === 'over_5')  query = query.gte('years_inactive', 5);
+      else if (yearsInactiveFilter === 'over_20') query = query.gte('years_inactive', 20);
+      else if (yearsInactiveFilter === 'over_50') query = query.gte('years_inactive', 50);
 
       query = query.order(sortCol, { ascending: sortDir === 'asc', nullsFirst: false });
       query = query.range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
@@ -160,15 +223,19 @@ export default function TablePage() {
       const { data, count, error } = await query;
       if (cancelled) return;
       if (!error && data) {
-        setRows(data as unknown as WellTableRow[]);
-        setTotal(count ?? 0);
+        const rows = data as unknown as WellTableRow[];
+        const total = count ?? 0;
+        setRows(rows);
+        setTotal(total);
+        await setCached(cacheKey, TABLE_VERSION, { rows, total });
       }
       setLoading(false);
     }
     fetchData();
     return () => { cancelled = true; };
   }, [debouncedSearch, countyFilter, appalachianOnly, priorityFilter, statusFilter,
-      operatorStatusFilter, sortCol, sortDir, page]);
+      operatorStatusFilter, adminStatusFilter, lastProdFilter, yearsInactiveFilter,
+      sortCol, sortDir, page]);
 
   function handleSort(col: SortCol) {
     if (col === sortCol) {
@@ -184,14 +251,23 @@ export default function TablePage() {
     setSearch('');
     setDebouncedSearch('');
     setCountyFilter('');
+    setCountyQuery('');
+    setCountyOpen(false);
     setAppalachianOnly(false);
     setPriorityFilter([]);
     setStatusFilter('');
     setOperatorStatusFilter('');
+    setAdminStatusFilter('');
+    setLastProdFilter('');
+    setYearsInactiveFilter('');
     setPage(0);
   }
 
-  const hasFilters = !!(search || countyFilter || appalachianOnly || priorityFilter.length || statusFilter || operatorStatusFilter);
+  function fmtCounty(c: string) {
+    return c ? c.charAt(0) + c.slice(1).toLowerCase() : '';
+  }
+
+  const hasFilters = !!(search || countyFilter || appalachianOnly || priorityFilter.length || statusFilter || operatorStatusFilter || adminStatusFilter || lastProdFilter || yearsInactiveFilter);
 
   // ── Excel export ────────────────────────────────────────────────────────────
   const [exportLoading, setExportLoading] = useState(false);
@@ -213,7 +289,7 @@ export default function TablePage() {
             'last_nonzero_production_year,last_active_year,last_active_source,' +
             'priority,risk_score,water_risk_score,population_risk_score,' +
             'inactivity_score,nearest_water_distance_m,within_protection_zone,' +
-            'operator_status,population_within_1km,population_within_5km,' +
+            'operator_status,admin_status,population_within_1km,population_within_5km,' +
             'years_inactive,lat,lng'
           );
 
@@ -223,6 +299,18 @@ export default function TablePage() {
         if (priorityFilter.length) q = q.in('priority', priorityFilter);
         if (statusFilter)          q = q.eq('status', statusFilter);
         if (operatorStatusFilter)  q = q.eq('operator_status', operatorStatusFilter);
+        if (adminStatusFilter)     q = q.eq('admin_status', adminStatusFilter);
+
+        if (lastProdFilter === 'never')         q = q.is('last_nonzero_production_year', null);
+        else if (lastProdFilter === 'before_2000') q = q.lt('last_nonzero_production_year', 2000);
+        else if (lastProdFilter === '2000_2014')   q = q.gte('last_nonzero_production_year', 2000).lt('last_nonzero_production_year', 2015);
+        else if (lastProdFilter === '2015_2019')   q = q.gte('last_nonzero_production_year', 2015).lt('last_nonzero_production_year', 2020);
+        else if (lastProdFilter === '2020_plus')   q = q.gte('last_nonzero_production_year', 2020);
+
+        if (yearsInactiveFilter === 'under_5')      q = q.lt('years_inactive', 5);
+        else if (yearsInactiveFilter === 'over_5')  q = q.gte('years_inactive', 5);
+        else if (yearsInactiveFilter === 'over_20') q = q.gte('years_inactive', 20);
+        else if (yearsInactiveFilter === 'over_50') q = q.gte('years_inactive', 50);
 
         q = q.order(sortCol, { ascending: sortDir === 'asc', nullsFirst: false });
         q = q.range(from, from + BATCH - 1);
@@ -242,6 +330,7 @@ export default function TablePage() {
         'Township':              r.township ?? '',
         'Status':                r.status ?? '',
         'Operator Status':       r.operator_status ?? '',
+        'Admin Status':          r.admin_status ? (ADMIN_STATUS_LABEL[r.admin_status as AdminStatus] ?? r.admin_status) : '',
         'Operator':              r.operator ?? '',
         'In Orphan Program':     r.in_orphan_program ? 'Yes' : 'No',
         'Priority':              r.priority ?? '',
@@ -252,10 +341,10 @@ export default function TablePage() {
         'Years Inactive':        r.years_inactive ?? '',
         'Last Active Year':      r.last_active_year ?? '',
         'Last Active Source':    r.last_active_source === 'compl' ? 'Completion date' : r.last_active_source === 'prod' ? 'Production record' : '',
-        'Water Dist (km)':       r.nearest_water_distance_m != null ? +(r.nearest_water_distance_m / 1000).toFixed(2) : '',
+        'Water Dist (mi)':       r.nearest_water_distance_m != null ? +metersToMiles(r.nearest_water_distance_m).toFixed(2) : '',
         'In Protection Zone':    r.within_protection_zone ? 'Yes' : 'No',
-        'Population 1km':        r.population_within_1km ?? '',
-        'Population 5km':        r.population_within_5km ?? '',
+        [`Population ${RADIUS_1KM}`]: r.population_within_1km ?? '',
+        [`Population ${RADIUS_5KM}`]: r.population_within_5km ?? '',
         'Well Type':             r.well_type ?? '',
         'Completion Date':       r.completion_date?.slice(0, 10) ?? '',
         'Permit Issued':         r.permit_issued?.slice(0, 10) ?? '',
@@ -339,19 +428,18 @@ export default function TablePage() {
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-white">
 
-      {/* ── Header ─────────────────────────────────────────────────────── */}
-      <header className="flex items-center justify-between px-5 py-3 bg-gray-900 border-b border-gray-700 shrink-0">
-        <div className="flex items-center gap-4">
-          <h1 className="text-sm font-semibold tracking-tight">Ohio Well Data — Table</h1>
-          <span className="text-xs text-gray-500">
+      <SiteHeader
+        title="Table"
+        leftExtra={
+          <span>
             {loading
               ? 'Loading…'
               : total > 0
                 ? `${startRow.toLocaleString()}–${endRow.toLocaleString()} of ${total.toLocaleString()} wells`
                 : 'No results'}
           </span>
-        </div>
-        <nav className="flex items-center gap-4">
+        }
+        rightExtra={
           <button
             onClick={handleExport}
             disabled={exportLoading || loading}
@@ -359,14 +447,8 @@ export default function TablePage() {
           >
             {exportLoading ? 'Preparing…' : '↓ Excel'}
           </button>
-          <Link href="/about"    className="text-xs text-gray-400 hover:text-white transition-colors">About</Link>
-          <Link href="/"         className="text-xs text-gray-400 hover:text-white transition-colors">← Map</Link>
-          <Link href="/counties" className="text-xs text-gray-400 hover:text-white transition-colors">Counties</Link>
-          <Link href="/facts"    className="text-xs text-gray-400 hover:text-white transition-colors">Facts</Link>
-          <Link href="/impact"   className="text-xs text-gray-400 hover:text-white transition-colors">Impact</Link>
-          <Link href="/emissions" className="text-xs text-gray-400 hover:text-white transition-colors">Emissions →</Link>
-        </nav>
-      </header>
+        }
+      />
 
       {/* ── Filter bar ─────────────────────────────────────────────────── */}
       <div className="flex items-center gap-2 px-4 py-2 bg-gray-900 border-b border-gray-700 shrink-0 flex-wrap">
@@ -382,7 +464,7 @@ export default function TablePage() {
 
         {/* Appalachian toggle */}
         <button
-          onClick={() => { setAppalachianOnly(v => !v); setCountyFilter(''); setPage(0); }}
+          onClick={() => { setAppalachianOnly(v => !v); setCountyFilter(''); setCountyQuery(''); setPage(0); }}
           className="px-2 py-1 rounded text-xs font-medium border transition-colors"
           style={{
             borderColor:     '#a78bfa',
@@ -393,19 +475,54 @@ export default function TablePage() {
           Appalachian
         </button>
 
-        {/* County */}
-        <select
-          value={countyFilter}
-          onChange={e => { setCountyFilter(e.target.value); setPage(0); }}
-          className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs focus:outline-none focus:border-gray-400"
-        >
-          <option value="">{appalachianOnly ? 'All ARC counties' : 'All counties'}</option>
-          {visibleCounties.map(c => (
-            <option key={c} value={c}>
-              {c.charAt(0) + c.slice(1).toLowerCase()}
-            </option>
-          ))}
-        </select>
+        {/* County — searchable combobox */}
+        <div className="relative">
+          <input
+            type="text"
+            placeholder={appalachianOnly ? 'All ARC counties' : 'Search counties…'}
+            value={countyOpen ? countyQuery : fmtCounty(countyFilter)}
+            onFocus={() => { setCountyOpen(true); setCountyQuery(''); }}
+            onChange={e => { setCountyQuery(e.target.value); setCountyOpen(true); }}
+            onBlur={() => setTimeout(() => setCountyOpen(false), 150)}
+            className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs placeholder-gray-500 focus:outline-none focus:border-gray-400 w-44"
+          />
+          {countyOpen && (() => {
+            const q = countyQuery.trim().toLowerCase();
+            const matches = q
+              ? visibleCounties.filter(c => c.toLowerCase().includes(q))
+              : visibleCounties;
+            return (
+              <div className="absolute z-30 mt-1 max-h-64 overflow-auto bg-gray-800 border border-gray-600 rounded text-xs w-56 shadow-lg">
+                <button
+                  type="button"
+                  onMouseDown={e => { e.preventDefault(); setCountyFilter(''); setCountyQuery(''); setCountyOpen(false); setPage(0); }}
+                  className={`block w-full text-left px-3 py-1.5 hover:bg-gray-700 ${countyFilter === '' ? 'bg-gray-700 text-white' : 'text-gray-400'}`}
+                >
+                  {appalachianOnly ? 'All ARC counties' : 'All counties'}
+                </button>
+                {matches.length === 0 && (
+                  <div className="px-3 py-2 text-gray-500">No matches</div>
+                )}
+                {matches.map(c => (
+                  <button
+                    key={c}
+                    type="button"
+                    onMouseDown={e => {
+                      e.preventDefault();
+                      setCountyFilter(c);
+                      setCountyQuery('');
+                      setCountyOpen(false);
+                      setPage(0);
+                    }}
+                    className={`block w-full text-left px-3 py-1.5 hover:bg-gray-700 ${countyFilter === c ? 'bg-gray-700 text-white' : 'text-gray-300'}`}
+                  >
+                    {fmtCounty(c)}
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
 
         {/* Priority pills */}
         <div className="flex items-center gap-1">
@@ -458,6 +575,56 @@ export default function TablePage() {
           <option value="unknown">Unknown</option>
         </select>
 
+        {/* Admin status — operational classification with hidden-orphan categories */}
+        <select
+          value={adminStatusFilter}
+          onChange={e => { setAdminStatusFilter(e.target.value); setPage(0); }}
+          className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs focus:outline-none focus:border-gray-400"
+        >
+          <option value="">All admin statuses</option>
+          <option value="orphan_program">Orphan Program</option>
+          <option value="orphan_official">Orphan (Official)</option>
+          <option value="historic_owner">Historic Owner</option>
+          <option value="zombie_producer">Producing, No Recent Output</option>
+          <option value="paperwork_producer">No Production Filed</option>
+          <option value="permit_expired">Permit Expired</option>
+          <option value="drilled_never_produced">Drilled, No Production</option>
+          <option value="status_unknown">Status Unknown</option>
+          <option value="well_extinct">Well Not Found</option>
+          <option value="permit_cancelled">Permit Cancelled</option>
+          <option value="named_operator">Named Operator</option>
+          <option value="unknown">Unknown</option>
+        </select>
+
+        {/* Last produced — calendar bucket. "Never produced" is null. */}
+        <select
+          value={lastProdFilter}
+          onChange={e => { setLastProdFilter(e.target.value); setPage(0); }}
+          className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs focus:outline-none focus:border-gray-400"
+          title="Filter by year of last reported production"
+        >
+          <option value="">Last produced (any)</option>
+          <option value="never">Never produced</option>
+          <option value="before_2000">Before 2000</option>
+          <option value="2000_2014">2000–2014</option>
+          <option value="2015_2019">2015–2019</option>
+          <option value="2020_plus">2020 or later</option>
+        </select>
+
+        {/* Years inactive — duration threshold. */}
+        <select
+          value={yearsInactiveFilter}
+          onChange={e => { setYearsInactiveFilter(e.target.value); setPage(0); }}
+          className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs focus:outline-none focus:border-gray-400"
+          title="Filter by computed years since last reported production"
+        >
+          <option value="">Years inactive (any)</option>
+          <option value="under_5">Active (&lt; 5 yrs)</option>
+          <option value="over_5">≥ 5 years</option>
+          <option value="over_20">≥ 20 years</option>
+          <option value="over_50">≥ 50 years (legacy)</option>
+        </select>
+
         {/* Clear */}
         {hasFilters && (
           <button
@@ -482,6 +649,7 @@ export default function TablePage() {
               <Col label="Township"     col="township"                    sort={sortCol} dir={sortDir} onSort={handleSort} />
               <Col label="Status"       col="status"                      sort={sortCol} dir={sortDir} onSort={handleSort} />
               <Col label="Oper. Status" col="operator_status"             sort={sortCol} dir={sortDir} onSort={handleSort} />
+              <Col label="Admin Status" col="admin_status"                sort={sortCol} dir={sortDir} onSort={handleSort} />
               <Col label="Operator"     col="operator"                    sort={sortCol} dir={sortDir} onSort={handleSort} />
               <Col label="Orphan"       col="in_orphan_program"           sort={sortCol} dir={sortDir} onSort={handleSort} center />
               <Col label="Yrs Inactive" col="years_inactive"              sort={sortCol} dir={sortDir} onSort={handleSort} right />
@@ -491,8 +659,8 @@ export default function TablePage() {
               <Col label="Water Risk"   col="water_risk_score"            sort={sortCol} dir={sortDir} onSort={handleSort} right />
               <Col label="Pop Risk"     col="population_risk_score"       sort={sortCol} dir={sortDir} onSort={handleSort} right />
               <Col label="Inactivity"   col="inactivity_score"            sort={sortCol} dir={sortDir} onSort={handleSort} right />
-              <Col label="Pop 1km"      col="population_within_1km"       sort={sortCol} dir={sortDir} onSort={handleSort} right />
-              <Col label="Pop 5km"      col="population_within_5km"       sort={sortCol} dir={sortDir} onSort={handleSort} right />
+              <Col label={`Pop ${RADIUS_1KM}`}  col="population_within_1km"       sort={sortCol} dir={sortDir} onSort={handleSort} right />
+              <Col label={`Pop ${RADIUS_5KM}`}  col="population_within_5km"       sort={sortCol} dir={sortDir} onSort={handleSort} right />
               <Col label="Type"         col="well_type"                   sort={sortCol} dir={sortDir} onSort={handleSort} />
               <Col label="Completion"   col="completion_date"             sort={sortCol} dir={sortDir} onSort={handleSort} />
               <Col label="Permit"       col="permit_issued"               sort={sortCol} dir={sortDir} onSort={handleSort} />
@@ -502,11 +670,11 @@ export default function TablePage() {
           <tbody>
             {loading && rows.length === 0 ? (
               <tr>
-                <td colSpan={23} className="text-center py-10 text-gray-500">Loading…</td>
+                <td colSpan={24} className="text-center py-10 text-gray-500">Loading…</td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={23} className="text-center py-10 text-gray-500">No wells match these filters.</td>
+                <td colSpan={24} className="text-center py-10 text-gray-500">No wells match these filters.</td>
               </tr>
             ) : rows.map((row, i) => (
               <DataRow key={row.api_no} row={row} stripe={i % 2 === 1} />
@@ -595,7 +763,14 @@ function DataRow({ row, stripe }: { row: WellTableRow; stripe: boolean }) {
       </td>
 
       {/* API No */}
-      <td className="px-2 py-1 font-mono text-gray-400 whitespace-nowrap">{row.api_no}</td>
+      <td className="px-2 py-1 font-mono text-gray-400 whitespace-nowrap">
+        <Link
+          href={`/wells/${encodeURIComponent(row.api_no)}`}
+          className="hover:text-white hover:underline underline-offset-2"
+        >
+          {row.api_no}
+        </Link>
+      </td>
 
       {/* Well Name */}
       <td className="px-2 py-1 max-w-44 truncate" title={row.well_name ?? ''}>
@@ -604,7 +779,14 @@ function DataRow({ row, stripe }: { row: WellTableRow; stripe: boolean }) {
 
       {/* County */}
       <td className="px-2 py-1 whitespace-nowrap">
-        {row.county ? titleCase(row.county) : <Dash />}
+        {row.county ? (
+          <Link
+            href={`/counties/${encodeURIComponent(row.county)}`}
+            className="hover:text-white hover:underline underline-offset-2"
+          >
+            {titleCase(row.county)}
+          </Link>
+        ) : <Dash />}
       </td>
 
       {/* Township */}
@@ -626,9 +808,25 @@ function DataRow({ row, stripe }: { row: WellTableRow; stripe: boolean }) {
           : <Dash />}
       </td>
 
+      {/* Admin status */}
+      <td className="px-2 py-1 whitespace-nowrap">
+        {row.admin_status
+          ? <span style={{ color: ADMIN_STATUS_COLOR[row.admin_status as AdminStatus] ?? '#fff' }}>
+              {ADMIN_STATUS_LABEL[row.admin_status as AdminStatus] ?? row.admin_status}
+            </span>
+          : <Dash />}
+      </td>
+
       {/* Operator */}
       <td className="px-2 py-1 max-w-40 truncate text-gray-300" title={row.operator ?? ''}>
-        {row.operator ?? <Dash />}
+        {row.operator ? (
+          <Link
+            href={`/operators/${encodeURIComponent(row.operator)}`}
+            className="hover:text-white hover:underline underline-offset-2"
+          >
+            {row.operator}
+          </Link>
+        ) : <Dash />}
       </td>
 
       {/* Orphan program */}
@@ -657,9 +855,7 @@ function DataRow({ row, stripe }: { row: WellTableRow; stripe: boolean }) {
 
       {/* Water distance */}
       <td className="px-2 py-1 font-mono text-right whitespace-nowrap">
-        {row.nearest_water_distance_m != null
-          ? `${(row.nearest_water_distance_m / 1000).toFixed(1)} km`
-          : <Dash />}
+        {formatDistanceUS(row.nearest_water_distance_m)}
       </td>
 
       {/* In protection zone */}

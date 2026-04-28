@@ -1,20 +1,36 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { useState } from 'react';
-import Link from 'next/link';
+import { Suspense, useEffect, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { WellDetail, Priority, CountySummary, NearYouResult } from '@/lib/types';
 import WellSidebar from '@/components/WellSidebar';
+import SiteHeader from '@/components/SiteHeader';
 
 // Disable SSR for the map — Mapbox GL requires the browser DOM
 const WellMap = dynamic(() => import('@/components/WellMap'), { ssr: false });
 
-export default function Home() {
+function HomeInner() {
+  const searchParams = useSearchParams();
+
   const [selectedWell, setSelectedWell] = useState<WellDetail | null>(null);
   const [selectedCounty, setSelectedCounty] = useState<CountySummary | null>(null);
   const [filters, setFilters] = useState<Priority[]>(['critical', 'high', 'medium', 'low']);
   const [nearYouResult, setNearYouResult] = useState<NearYouResult | null>(null);
   const [centerOn, setCenterOn] = useState<{ lat: number; lng: number } | null>(null);
+
+  // Deep-link from "View on Map" buttons (well detail page + county map popup).
+  // Reads ?lat=&lng= and centers the map on that point. We only honor this on
+  // first mount so the user can pan away freely afterward.
+  useEffect(() => {
+    const lat = parseFloat(searchParams?.get('lat') ?? '');
+    const lng = parseFloat(searchParams?.get('lng') ?? '');
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      setCenterOn({ lat, lng });
+    }
+    // intentionally empty deps — only fires on mount with the initial URL
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function toggleFilter(priority: Priority) {
     setFilters(prev =>
@@ -39,21 +55,7 @@ export default function Home() {
 
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-white">
-      {/* Header */}
-      <header className="flex items-center justify-between px-5 py-3 bg-gray-900 border-b border-gray-700 shrink-0">
-        <div className="flex items-center gap-3">
-          <h1 className="text-sm font-semibold tracking-tight">Ohio Well Risk Viewer</h1>
-          <span className="text-xs text-gray-500">Click a well or county to inspect</span>
-        </div>
-        <div className="flex items-center gap-4">
-          <Link href="/about"    className="text-xs text-gray-400 hover:text-white transition-colors">About</Link>
-          <Link href="/table"    className="text-xs text-gray-400 hover:text-white transition-colors">Table</Link>
-          <Link href="/counties" className="text-xs text-gray-400 hover:text-white transition-colors">Counties</Link>
-          <Link href="/facts"    className="text-xs text-gray-400 hover:text-white transition-colors">Facts</Link>
-          <Link href="/impact"   className="text-xs text-gray-400 hover:text-white transition-colors">Impact</Link>
-          <Link href="/emissions" className="text-xs text-gray-400 hover:text-white transition-colors">Emissions →</Link>
-        </div>
-      </header>
+      <SiteHeader leftExtra={<span>Click a well or county to inspect</span>} />
 
       {/* Body */}
       <div className="flex flex-1 overflow-hidden">
@@ -62,14 +64,13 @@ export default function Home() {
           onFilterChange={toggleFilter}
           onSelectWell={handleSelectWell}
           onSelectCounty={handleSelectCounty}
+          selectedCounty={selectedCounty}
           onNearYouResult={setNearYouResult}
           centerOn={centerOn}
         />
         <WellSidebar
           well={selectedWell}
           selectedCounty={selectedCounty}
-          filters={filters}
-          onFilterChange={toggleFilter}
           onClose={() => setSelectedWell(null)}
           onCloseCounty={() => setSelectedCounty(null)}
           nearYouResult={nearYouResult}
@@ -78,5 +79,14 @@ export default function Home() {
         />
       </div>
     </div>
+  );
+}
+
+export default function Home() {
+  // useSearchParams needs a Suspense boundary in Next 15+.
+  return (
+    <Suspense fallback={<div className="h-screen bg-gray-950" />}>
+      <HomeInner />
+    </Suspense>
   );
 }

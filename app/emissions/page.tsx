@@ -4,6 +4,7 @@ import { useEffect, useState, useMemo } from 'react';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 import { CountyEmissionsRow } from '@/lib/types';
+import SiteHeader from '@/components/SiteHeader';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -103,18 +104,7 @@ export default function EmissionsPage() {
 
   return (
     <div className="min-h-screen bg-gray-950 text-white">
-      {/* Header */}
-      <header className="flex items-center justify-between px-6 py-3 bg-gray-900 border-b border-gray-700">
-        <h1 className="text-sm font-semibold tracking-tight">Ohio Well Risk — Methane Emissions</h1>
-        <nav className="flex items-center gap-4">
-          <Link href="/about"    className="text-xs text-gray-400 hover:text-white transition-colors">About</Link>
-          <Link href="/"         className="text-xs text-gray-400 hover:text-white transition-colors">← Map</Link>
-          <Link href="/table"    className="text-xs text-gray-400 hover:text-white transition-colors">Table</Link>
-          <Link href="/counties" className="text-xs text-gray-400 hover:text-white transition-colors">Counties</Link>
-          <Link href="/facts"    className="text-xs text-gray-400 hover:text-white transition-colors">Facts</Link>
-          <Link href="/impact"   className="text-xs text-gray-400 hover:text-white transition-colors">Impact</Link>
-        </nav>
-      </header>
+      <SiteHeader title="Methane Emissions" sticky />
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-10">
 

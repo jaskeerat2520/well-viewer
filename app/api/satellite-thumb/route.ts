@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
   try {
     const res = await fetch(
       `${SATELLITE_SERVICE}/thumbnails?lat=${lat}&lng=${lng}`,
-      { signal: AbortSignal.timeout(45_000) }
+      { signal: AbortSignal.timeout(120_000) }
     );
     if (!res.ok) {
       const text = await res.text();
