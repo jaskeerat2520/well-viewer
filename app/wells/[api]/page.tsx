@@ -868,11 +868,17 @@ function ExposureCell({ label, value, sub, color }: { label: string; value: stri
 function WellspanTimeline({ well }: { well: WellRow }) {
   const today = new Date();
 
-  // Quarter string ("Q1".."Q4") → calendar month (0-indexed). Default to Q1
-  // when missing so the year is at least placed in time.
+  // Ohio's last_production_quarter is "<n>/<yyyy>" where n is 0..4
+  // (0 = annual rollup / unknown). Take only the leading digit; everything
+  // else (NaN, 0, out-of-range) falls through to January so the year still
+  // anchors the timeline. Without the early bound, `parseInt("02025") = 2025`
+  // would overflow `new Date(year, month, 1)` by ~500 years.
   function quarterToMonth(q: string | null): number {
-    const n = q ? parseInt(q.replace(/[^0-9]/g, ''), 10) : 1;
-    return ((Number.isFinite(n) ? n : 1) - 1) * 3;
+    if (!q) return 0;
+    const m = q.match(/^\s*(\d)/);
+    const n = m ? parseInt(m[1], 10) : 0;
+    if (n < 1 || n > 4) return 0;
+    return (n - 1) * 3;
   }
 
   const permitDate = well.permit_issued      ? new Date(well.permit_issued)     : null;
@@ -911,6 +917,7 @@ function WellspanTimeline({ well }: { well: WellRow }) {
   function yearsBetween(a: Date | null, b: Date | null): string {
     if (!a || !b) return '—';
     const yrs = (b.getTime() - a.getTime()) / (365.25 * 24 * 3600 * 1000);
+    if (yrs < 0) return '—';
     if (yrs < 1) return '<1 yr';
     return `${yrs.toFixed(0)} yr`;
   }
