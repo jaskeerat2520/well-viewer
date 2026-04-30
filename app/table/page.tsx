@@ -9,12 +9,19 @@ import { Priority, PRIORITY_COLOR, ADMIN_STATUS_LABEL, ADMIN_STATUS_COLOR, Admin
 import { formatDistanceUS, metersToMiles, RADIUS_1KM, RADIUS_5KM } from '@/lib/units';
 import SiteHeader from '@/components/SiteHeader';
 
-const TABLE_VERSION = 1;
-const STATUSES_VERSION = 1;
+const TABLE_VERSION = 2;
+const STATUSES_VERSION = 2;
 const TTL_24H = 24 * 60 * 60 * 1000;
 
 const PAGE_SIZE = 100;
 const PRIORITIES: Priority[] = ['critical', 'high', 'medium', 'low'];
+
+type StateCode = 'OH' | 'PA' | 'WV';
+const STATES: { code: StateCode; label: string }[] = [
+  { code: 'OH', label: 'Ohio' },
+  { code: 'PA', label: 'Pennsylvania' },
+  { code: 'WV', label: 'West Virginia' },
+];
 
 // 32 ARC (Appalachian Regional Commission) Ohio counties — stored ALL CAPS in DB
 const ARC_COUNTIES = [
@@ -69,6 +76,7 @@ interface WellTableRow {
   years_inactive: number | null;
   lat: number | null;
   lng: number | null;
+  state_code: StateCode | null;
 }
 
 type SortCol = keyof WellTableRow;
@@ -82,6 +90,7 @@ export default function TablePage() {
   const [loading, setLoading] = useState(true);
 
   // Filters
+  const [stateFilter, setStateFilter]               = useState<StateCode>('OH');
   const [search, setSearch]                         = useState('');
   const [debouncedSearch, setDebouncedSearch]       = useState('');
   const [countyFilter, setCountyFilter]             = useState('');
@@ -114,45 +123,62 @@ export default function TablePage() {
     }, 350);
   }
 
-  // Fetch county + status lists once on mount (cached — these change rarely)
+  // Fetch county + status lists when state changes (cached per state).
   useEffect(() => {
     let cancelled = false;
     async function loadCounties() {
-      const cached = await getCached<string[]>('table:counties_list', STATUSES_VERSION, TTL_24H);
+      const cacheKey = `table:counties_list:${stateFilter}`;
+      const cached = await getCached<string[]>(cacheKey, STATUSES_VERSION, TTL_24H);
       if (cancelled) return;
       if (cached) { setCounties(cached); return; }
-      const { data } = await supabase
-        .from('county_summary')
-        .select('county')
-        .not('county', 'is', null)
-        .order('county');
-      if (cancelled || !data) return;
-      const list = data.map(r => r.county as string);
+      // Ohio uses county_summary (richer, has scoring rollups). Other states pull
+      // distinct counties from wells, since county_summary is Ohio-only.
+      let list: string[] = [];
+      if (stateFilter === 'OH') {
+        const { data } = await supabase
+          .from('county_summary')
+          .select('county')
+          .not('county', 'is', null)
+          .order('county');
+        if (cancelled || !data) return;
+        list = data.map(r => r.county as string);
+      } else {
+        const { data } = await supabase
+          .from('wells')
+          .select('county')
+          .eq('state_code', stateFilter)
+          .not('county', 'is', null);
+        if (cancelled || !data) return;
+        list = [...new Set(data.map(r => r.county as string))].sort();
+      }
       setCounties(list);
-      await setCached('table:counties_list', STATUSES_VERSION, list);
+      await setCached(cacheKey, STATUSES_VERSION, list);
     }
     async function loadStatuses() {
-      const cached = await getCached<string[]>('table:statuses_list', STATUSES_VERSION, TTL_24H);
+      const cacheKey = `table:statuses_list:${stateFilter}`;
+      const cached = await getCached<string[]>(cacheKey, STATUSES_VERSION, TTL_24H);
       if (cancelled) return;
       if (cached) { setStatuses(cached); return; }
       const { data } = await supabase
         .from('wells')
         .select('status')
+        .eq('state_code', stateFilter)
         .not('status', 'is', null);
       if (cancelled || !data) return;
       const unique = [...new Set(data.map(r => r.status as string))].sort();
       setStatuses(unique);
-      await setCached('table:statuses_list', STATUSES_VERSION, unique);
+      await setCached(cacheKey, STATUSES_VERSION, unique);
     }
     loadCounties();
     loadStatuses();
     return () => { cancelled = true; };
-  }, []);
+  }, [stateFilter]);
 
   // Fetch paginated/filtered/sorted data
   useEffect(() => {
     let cancelled = false;
     const cacheKey = 'table:rows:' + JSON.stringify({
+      stc: stateFilter,
       q:   debouncedSearch,
       c:   countyFilter,
       arc: appalachianOnly,
@@ -188,17 +214,19 @@ export default function TablePage() {
           'priority,risk_score,water_risk_score,' +
           'population_risk_score,inactivity_score,nearest_water_distance_m,' +
           'within_protection_zone,operator_status,admin_status,population_within_1km,' +
-          'population_within_5km,years_inactive',
+          'population_within_5km,years_inactive,state_code',
           { count: 'exact' }
         );
+
+      query = query.eq('state_code', stateFilter);
 
       if (debouncedSearch) {
         query = query.or(
           `well_name.ilike.%${debouncedSearch}%,api_no.ilike.%${debouncedSearch}%`
         );
       }
-      if (countyFilter)          query = query.eq('county', countyFilter);
-      else if (appalachianOnly)  query = query.in('county', ARC_COUNTIES);
+      if (countyFilter)                                query = query.eq('county', countyFilter);
+      else if (appalachianOnly && stateFilter === 'OH') query = query.in('county', ARC_COUNTIES);
       if (priorityFilter.length) query = query.in('priority', priorityFilter);
       if (statusFilter)          query = query.eq('status', statusFilter);
       if (operatorStatusFilter)  query = query.eq('operator_status', operatorStatusFilter);
@@ -233,7 +261,7 @@ export default function TablePage() {
     }
     fetchData();
     return () => { cancelled = true; };
-  }, [debouncedSearch, countyFilter, appalachianOnly, priorityFilter, statusFilter,
+  }, [stateFilter, debouncedSearch, countyFilter, appalachianOnly, priorityFilter, statusFilter,
       operatorStatusFilter, adminStatusFilter, lastProdFilter, yearsInactiveFilter,
       sortCol, sortDir, page]);
 
@@ -261,6 +289,24 @@ export default function TablePage() {
     setLastProdFilter('');
     setYearsInactiveFilter('');
     setPage(0);
+    // stateFilter is intentionally NOT cleared — it's a scope, not a filter.
+  }
+
+  // Reset Ohio-specific filters when leaving Ohio.
+  function handleStateChange(next: StateCode) {
+    if (next === stateFilter) return;
+    setStateFilter(next);
+    setCountyFilter('');
+    setCountyQuery('');
+    setCountyOpen(false);
+    setAppalachianOnly(false);
+    setStatusFilter('');         // status vocabularies differ across states
+    setOperatorStatusFilter(''); // not populated for PA/WV
+    setAdminStatusFilter('');    // OH-only view (well_admin_status)
+    setLastProdFilter('');
+    setYearsInactiveFilter('');
+    setPriorityFilter([]);       // PA/WV have no risk scores
+    setPage(0);
   }
 
   function fmtCounty(c: string) {
@@ -268,6 +314,7 @@ export default function TablePage() {
   }
 
   const hasFilters = !!(search || countyFilter || appalachianOnly || priorityFilter.length || statusFilter || operatorStatusFilter || adminStatusFilter || lastProdFilter || yearsInactiveFilter);
+  const isOhio = stateFilter === 'OH';
 
   // ── Excel export ────────────────────────────────────────────────────────────
   const [exportLoading, setExportLoading] = useState(false);
@@ -290,12 +337,14 @@ export default function TablePage() {
             'priority,risk_score,water_risk_score,population_risk_score,' +
             'inactivity_score,nearest_water_distance_m,within_protection_zone,' +
             'operator_status,admin_status,population_within_1km,population_within_5km,' +
-            'years_inactive,lat,lng'
+            'years_inactive,lat,lng,state_code'
           );
 
+        q = q.eq('state_code', stateFilter);
+
         if (debouncedSearch) q = q.or(`well_name.ilike.%${debouncedSearch}%,api_no.ilike.%${debouncedSearch}%`);
-        if (countyFilter)         q = q.eq('county', countyFilter);
-        else if (appalachianOnly) q = q.in('county', ARC_COUNTIES);
+        if (countyFilter)                                 q = q.eq('county', countyFilter);
+        else if (appalachianOnly && stateFilter === 'OH') q = q.in('county', ARC_COUNTIES);
         if (priorityFilter.length) q = q.in('priority', priorityFilter);
         if (statusFilter)          q = q.eq('status', statusFilter);
         if (operatorStatusFilter)  q = q.eq('operator_status', operatorStatusFilter);
@@ -364,10 +413,10 @@ export default function TablePage() {
       wsWells['!freeze'] = { xSplit: 0, ySplit: 1 };
 
       // ── Sheet 2: County Summary ──────────────────────────────────────────
-      const { data: countyData } = await supabase
-        .from('county_status_summary')
-        .select('*')
-        .order('county');
+      // county_status_summary is Ohio-only; skip the sheet for PA/WV.
+      const countyData = stateFilter === 'OH'
+        ? (await supabase.from('county_status_summary').select('*').order('county')).data
+        : null;
 
       const countyRows = (countyData ?? []).map((r: Record<string, unknown>) => ({
         'County':           r.county,
@@ -399,17 +448,18 @@ export default function TablePage() {
 
       // ── Build workbook & download ────────────────────────────────────────
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, wsWells,   'Wells');
-      XLSX.utils.book_append_sheet(wb, wsCounty,  'County Summary');
+      XLSX.utils.book_append_sheet(wb, wsWells, 'Wells');
+      if (countyData) XLSX.utils.book_append_sheet(wb, wsCounty, 'County Summary');
 
       const filterLabel = [
-        appalachianOnly ? 'appalachian' : '',
+        appalachianOnly && stateFilter === 'OH' ? 'appalachian' : '',
         countyFilter    ? countyFilter.toLowerCase() : '',
         priorityFilter.length ? priorityFilter.join('-') : '',
         statusFilter    ? statusFilter.toLowerCase().replace(/\s+/g, '_') : '',
       ].filter(Boolean).join('_');
 
-      const filename = `ohio_wells${filterLabel ? '_' + filterLabel : ''}_${new Date().toISOString().slice(0,10)}.xlsx`;
+      const statePrefix = stateFilter.toLowerCase();
+      const filename = `${statePrefix}_wells${filterLabel ? '_' + filterLabel : ''}_${new Date().toISOString().slice(0,10)}.xlsx`;
       XLSX.writeFile(wb, filename);
 
     } finally {
@@ -453,6 +503,27 @@ export default function TablePage() {
       {/* ── Filter bar ─────────────────────────────────────────────────── */}
       <div className="flex items-center gap-2 px-4 py-2 bg-gray-900 border-b border-gray-700 shrink-0 flex-wrap">
 
+        {/* State selector — segmented pill group */}
+        <div className="flex items-center rounded border border-gray-600 overflow-hidden">
+          {STATES.map(({ code, label }) => {
+            const active = stateFilter === code;
+            return (
+              <button
+                key={code}
+                onClick={() => handleStateChange(code)}
+                className="px-2 py-1 text-xs font-medium transition-colors"
+                style={{
+                  backgroundColor: active ? '#3b82f6' : 'transparent',
+                  color:           active ? '#000' : '#9ca3af',
+                }}
+                title={label}
+              >
+                {code}
+              </button>
+            );
+          })}
+        </div>
+
         {/* Search */}
         <input
           type="text"
@@ -462,18 +533,20 @@ export default function TablePage() {
           className="bg-gray-800 border border-gray-600 rounded px-3 py-1 text-xs placeholder-gray-500 focus:outline-none focus:border-gray-400 w-52"
         />
 
-        {/* Appalachian toggle */}
-        <button
-          onClick={() => { setAppalachianOnly(v => !v); setCountyFilter(''); setCountyQuery(''); setPage(0); }}
-          className="px-2 py-1 rounded text-xs font-medium border transition-colors"
-          style={{
-            borderColor:     '#a78bfa',
-            color:           appalachianOnly ? '#000' : '#a78bfa',
-            backgroundColor: appalachianOnly ? '#a78bfa' : 'transparent',
-          }}
-        >
-          Appalachian
-        </button>
+        {/* Appalachian toggle (Ohio-only — ARC counties are in OH) */}
+        {isOhio && (
+          <button
+            onClick={() => { setAppalachianOnly(v => !v); setCountyFilter(''); setCountyQuery(''); setPage(0); }}
+            className="px-2 py-1 rounded text-xs font-medium border transition-colors"
+            style={{
+              borderColor:     '#a78bfa',
+              color:           appalachianOnly ? '#000' : '#a78bfa',
+              backgroundColor: appalachianOnly ? '#a78bfa' : 'transparent',
+            }}
+          >
+            Appalachian
+          </button>
+        )}
 
         {/* County — searchable combobox */}
         <div className="relative">
@@ -524,7 +597,8 @@ export default function TablePage() {
           })()}
         </div>
 
-        {/* Priority pills */}
+        {/* Priority pills (Ohio-only — risk scores not computed for PA/WV) */}
+        {isOhio && (
         <div className="flex items-center gap-1">
           {PRIORITIES.map(p => {
             const active = priorityFilter.includes(p);
@@ -551,6 +625,7 @@ export default function TablePage() {
             );
           })}
         </div>
+        )}
 
         {/* Status */}
         <select
@@ -562,7 +637,8 @@ export default function TablePage() {
           {statuses.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
 
-        {/* Operator status */}
+        {/* Operator status (Ohio-only — derived from OH RBDMS) */}
+        {isOhio && (
         <select
           value={operatorStatusFilter}
           onChange={e => { setOperatorStatusFilter(e.target.value); setPage(0); }}
@@ -574,8 +650,10 @@ export default function TablePage() {
           <option value="named_operator">Named Operator</option>
           <option value="unknown">Unknown</option>
         </select>
+        )}
 
-        {/* Admin status — operational classification with hidden-orphan categories */}
+        {/* Admin status — operational classification with hidden-orphan categories (Ohio-only) */}
+        {isOhio && (
         <select
           value={adminStatusFilter}
           onChange={e => { setAdminStatusFilter(e.target.value); setPage(0); }}
@@ -595,8 +673,10 @@ export default function TablePage() {
           <option value="named_operator">Named Operator</option>
           <option value="unknown">Unknown</option>
         </select>
+        )}
 
-        {/* Last produced — calendar bucket. "Never produced" is null. */}
+        {/* Last produced — calendar bucket. "Never produced" is null. (Ohio-only — production_year backfilled for OH only) */}
+        {isOhio && (
         <select
           value={lastProdFilter}
           onChange={e => { setLastProdFilter(e.target.value); setPage(0); }}
@@ -610,8 +690,10 @@ export default function TablePage() {
           <option value="2015_2019">2015–2019</option>
           <option value="2020_plus">2020 or later</option>
         </select>
+        )}
 
-        {/* Years inactive — duration threshold. */}
+        {/* Years inactive — duration threshold. (Ohio-only) */}
+        {isOhio && (
         <select
           value={yearsInactiveFilter}
           onChange={e => { setYearsInactiveFilter(e.target.value); setPage(0); }}
@@ -624,6 +706,7 @@ export default function TablePage() {
           <option value="over_20">≥ 20 years</option>
           <option value="over_50">≥ 50 years (legacy)</option>
         </select>
+        )}
 
         {/* Clear */}
         {hasFilters && (
