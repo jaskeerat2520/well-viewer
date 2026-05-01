@@ -703,6 +703,11 @@ export default function WellSidebar({ well, selectedCounty, onClose, onCloseCoun
                     : 'Currently producing')
                 : well.years_inactive != null ? `${well.years_inactive} yrs` : 'Unknown'
             } />
+            <Row label="Last production" value={
+              well.last_nonzero_production_year != null
+                ? String(well.last_nonzero_production_year)
+                : 'None on record'
+            } highlight={well.last_nonzero_production_year == null} />
             <Row label="Water distance" value={formatDistanceUS(well.nearest_water_distance_m)} />
             <Row label="In zone"      value={well.within_protection_zone ? 'Yes' : 'No'}
               highlight={well.within_protection_zone} />

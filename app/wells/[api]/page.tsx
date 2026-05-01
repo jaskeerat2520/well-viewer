@@ -151,10 +151,10 @@ type DimKey = 'water_risk_score' | 'population_risk_score' | 'vegetation_risk_sc
 const DIMENSIONS: { key: DimKey; label: string; weight: number; color: string; blurb: string }[] = [
   { key: 'water_risk_score',      label: 'Water',      weight: 25, color: '#60a5fa', blurb: 'proximity to drinking-water protection zones' },
   { key: 'population_risk_score', label: 'Population', weight: 15, color: '#c084fc', blurb: 'people within 1 km / 5 km' },
-  { key: 'vegetation_risk_score', label: 'Vegetation', weight: 20, color: '#4ade80', blurb: 'NDVI anomaly + multi-year trend (Sentinel-2)' },
-  { key: 'terrain_risk_score',    label: 'Terrain',    weight: 10, color: '#fbbf24', blurb: 'artificial-pad detection (3DEP slope ratio)' },
+  { key: 'vegetation_risk_score', label: 'Vegetation', weight: 15, color: '#4ade80', blurb: 'NDVI anomaly + multi-year trend (Sentinel-2)' },
+  { key: 'terrain_risk_score',    label: 'Terrain',    weight:  5, color: '#fbbf24', blurb: 'artificial-pad detection (3DEP slope ratio)' },
   { key: 'emissions_risk_score',  label: 'Emissions',  weight: 20, color: '#f87171', blurb: 'CH4 (Sentinel-5P) + thermal (Landsat 9)' },
-  { key: 'inactivity_score',      label: 'Inactivity', weight: 10, color: '#94a3b8', blurb: 'years since last reported production' },
+  { key: 'inactivity_score',      label: 'Inactivity', weight: 20, color: '#94a3b8', blurb: 'years since last reported production' },
 ];
 
 // ── Page ──────────────────────────────────────────────────────────────────────

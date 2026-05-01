@@ -40,12 +40,13 @@ interface CountySummary {
 
 interface DimensionBreakdown {
   county: string;
-  water_n: number; population_n: number; vegetation_n: number; terrain_n: number; emissions_n: number;
+  water_n: number; population_n: number; vegetation_n: number; terrain_n: number; emissions_n: number; inactivity_n: number;
   avg_water: number | null;
   avg_population: number | null;
   avg_vegetation: number | null;
   avg_terrain: number | null;
   avg_emissions: number | null;
+  avg_inactivity: number | null;
 }
 
 interface OperatorRow {
@@ -126,13 +127,15 @@ function costEstimate(s: CountySummary): { low: number; mid: number; high: numbe
 }
 
 // Dimension config (mirror of operator detail page, adapted for county keys)
-type DimKey = 'avg_water' | 'avg_population' | 'avg_vegetation' | 'avg_terrain' | 'avg_emissions';
+// Weights mirror compute_composite.py — 2026-05-01: water 25 / pop 15 / veg 15 / terr 5 / emis 20 / inact 20.
+type DimKey = 'avg_water' | 'avg_population' | 'avg_vegetation' | 'avg_terrain' | 'avg_emissions' | 'avg_inactivity';
 const DIMENSIONS: { key: DimKey; label: string; weight: number; color: string; blurb: string }[] = [
-  { key: 'avg_water',      label: 'Water',      weight: 30, color: '#60a5fa', blurb: 'proximity to drinking-water protection zones' },
-  { key: 'avg_population', label: 'Population', weight: 20, color: '#c084fc', blurb: `people within ${RADIUS_1KM} / ${RADIUS_5KM}` },
-  { key: 'avg_vegetation', label: 'Vegetation', weight: 20, color: '#4ade80', blurb: 'NDVI anomaly + multi-year trend (Sentinel-2)' },
-  { key: 'avg_terrain',    label: 'Terrain',    weight: 10, color: '#fbbf24', blurb: 'artificial-pad detection (3DEP slope ratio)' },
+  { key: 'avg_water',      label: 'Water',      weight: 25, color: '#60a5fa', blurb: 'proximity to drinking-water protection zones' },
+  { key: 'avg_population', label: 'Population', weight: 15, color: '#c084fc', blurb: `people within ${RADIUS_1KM} / ${RADIUS_5KM}` },
+  { key: 'avg_vegetation', label: 'Vegetation', weight: 15, color: '#4ade80', blurb: 'NDVI anomaly + multi-year trend (Sentinel-2)' },
+  { key: 'avg_terrain',    label: 'Terrain',    weight:  5, color: '#fbbf24', blurb: 'artificial-pad detection (3DEP slope ratio)' },
   { key: 'avg_emissions',  label: 'Emissions',  weight: 20, color: '#f87171', blurb: 'CH4 (Sentinel-5P) + thermal (Landsat 9)' },
+  { key: 'avg_inactivity', label: 'Inactivity', weight: 20, color: '#94a3b8', blurb: 'years since last reported production' },
 ];
 
 // ── Page ──────────────────────────────────────────────────────────────────────
