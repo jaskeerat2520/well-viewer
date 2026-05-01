@@ -660,6 +660,9 @@ export default function WellSidebar({ well, selectedCounty, onClose, onCloseCoun
           {/* Remote-sensing detail */}
           <RemoteSensingSection well={well} />
 
+          {/* OEPA spills within 1 km (current calendar year) */}
+          <NearbySpillsSection apiNo={well.api_no} />
+
           {/* Landowner & mineral-rights detail (compact sidebar version) */}
           <LandownerSection well={well} />
 
@@ -740,6 +743,109 @@ function Row({ label, value, highlight, color }: { label: string; value?: React.
       >
         {value ?? '—'}
       </span>
+    </div>
+  );
+}
+
+// OEPA "Spills as Reported" — current-year incidents within 1 km of the well.
+// Visibility/accountability surface only; not a scoring contributor. Empty
+// state stays rendered so users learn the section exists even when quiet.
+interface NearbySpill {
+  case_number: string;
+  reported_product: string | null;
+  reported_amount: number | null;
+  reported_uom: string | null;
+  reported_date: string | null;
+  city_township: string | null;
+  waterway: string | null;
+  is_oil_gas: boolean;
+  distance_m: number;
+  lng: number;
+  lat: number;
+}
+
+function NearbySpillsSection({ apiNo }: { apiNo: string }) {
+  const [spills, setSpills] = useState<NearbySpill[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSpills(null);
+    setError(null);
+    fetch(`/api/spills/near/${encodeURIComponent(apiNo)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: { spills: NearbySpill[] }) => {
+        if (!cancelled) setSpills(data.spills ?? []);
+      })
+      .catch((e: Error) => {
+        if (!cancelled) setError(e.message);
+      });
+    return () => { cancelled = true; };
+  }, [apiNo]);
+
+  return (
+    <div className="mb-4">
+      <p className="text-xs text-gray-400 uppercase tracking-wider mb-2">
+        Nearby reported spills
+        <span className="ml-2 text-[10px] text-gray-500 normal-case tracking-normal">
+          (1 km · current year · OEPA)
+        </span>
+      </p>
+
+      {spills === null && !error && (
+        <p className="text-xs text-gray-500">Checking…</p>
+      )}
+      {error && (
+        <p className="text-xs text-orange-400">Failed to load: {error}</p>
+      )}
+      {spills !== null && spills.length === 0 && (
+        <p className="text-xs text-gray-500">
+          No OEPA-reported spills within 1 km this year.
+        </p>
+      )}
+      {spills !== null && spills.length > 0 && (
+        <div className="space-y-2">
+          {spills.map((s) => {
+            const date = s.reported_date ? s.reported_date.slice(0, 10) : '—';
+            const amt =
+              s.reported_amount != null && Number(s.reported_amount) > 0
+                ? `${s.reported_amount}${s.reported_uom ? ' ' + s.reported_uom : ''}`
+                : 'unknown qty';
+            return (
+              <div
+                key={s.case_number}
+                className="text-xs border-l-2 pl-2"
+                style={{ borderColor: s.is_oil_gas ? '#dc2626' : '#fbbf24' }}
+              >
+                <div className="flex justify-between gap-2">
+                  <span className="text-white truncate" title={s.reported_product ?? ''}>
+                    {s.reported_product ?? '—'}
+                  </span>
+                  <span className="text-gray-400 shrink-0">
+                    {Math.round(s.distance_m)} m
+                  </span>
+                </div>
+                <div className="flex justify-between gap-2 text-[10px] text-gray-500">
+                  <span>
+                    {date} · {amt}
+                    {s.is_oil_gas && (
+                      <span className="ml-1 text-red-400 font-semibold">OIL/GAS</span>
+                    )}
+                  </span>
+                  <span className="font-mono truncate" title={s.case_number}>
+                    {s.case_number}
+                  </span>
+                </div>
+                {s.waterway && (
+                  <div className="text-[10px] text-gray-400">
+                    Waterway: <span className="text-white">{s.waterway}</span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

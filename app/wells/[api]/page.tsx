@@ -5,6 +5,7 @@ import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 import SiteHeader from '@/components/SiteHeader';
+import ImageryComparison from '@/components/ImageryComparison';
 
 const OsipThumb = dynamic(() => import('@/components/OsipThumb'), { ssr: false });
 
@@ -620,6 +621,19 @@ export default function WellDetailPage({
                       Drag to pan, scroll to zoom. OSIP refreshes every few years; use it to confirm
                       visible features (tank battery, fresh disturbance, vegetation around the pad)
                       against the spectral anomalies below.
+                    </p>
+                  </div>
+                )}
+                {well.lat != null && well.lng != null && (
+                  <div className="mb-5">
+                    <h4 className="text-[11px] uppercase tracking-wider text-emerald-400 mb-2">
+                      Vegetation change — 2016 vs selected year
+                    </h4>
+                    <ImageryComparison lat={well.lat} lng={well.lng} />
+                    <p className="text-[10px] text-gray-500 mt-1.5 leading-tight">
+                      Sentinel-2 median composites, May–Oct each year. NDVI legend: red = bare or
+                      stressed, green = healthy vegetation. Pick a recent year to see how the site
+                      has evolved.
                     </p>
                   </div>
                 )}

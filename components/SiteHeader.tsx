@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
-// Grouped nav — primary data exploration · analysis · meta.
+// Grouped nav — primary data exploration · analysis · meta · states.
 // Visual gap between groups is rendered with a spacer div below.
 const NAV_GROUPS: { href: string; label: string }[][] = [
   [
@@ -22,6 +22,14 @@ const NAV_GROUPS: { href: string; label: string }[][] = [
   [
     { href: '/methodology', label: 'Methodology' },
     { href: '/about',       label: 'About' },
+  ],
+  // Multi-state expansion (PoC). PA + WV wells are imported but not yet scored;
+  // /states/[state] surfaces them on a focused per-state map; /states/all
+  // overlays all three states on one map.
+  [
+    { href: '/states/all', label: 'All states' },
+    { href: '/states/pa',  label: 'PA' },
+    { href: '/states/wv',  label: 'WV' },
   ],
 ];
 
