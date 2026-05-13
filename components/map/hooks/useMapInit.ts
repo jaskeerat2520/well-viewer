@@ -298,9 +298,11 @@ export function useMapInit(
           // (maxZoom: 10) would yank the user back to zoom 10 whenever they're
           // more zoomed in. Guard by checking for higher-priority features at
           // the same point; if any exist, defer to their handlers.
-          const topHits = m.queryRenderedFeatures(e.point, {
-            layers: ['methane-plumes-dot', 'oepa-spills-dot', 'schools-dot', 'hospitals-dot', 'tri-facilities-dot', 'pa-oilgas-dot', 'pad-candidates-dot', 'wells-critical', 'wells-high', 'wells-medium', 'wells-low', 'parcels-fill'],
-          });
+          const priorityLayerIds = ['methane-plumes-dot', 'oepa-spills-dot', 'schools-dot', 'hospitals-dot', 'tri-facilities-dot', 'pa-oilgas-dot', 'pad-candidates-dot', 'wells-critical', 'wells-high', 'wells-medium', 'wells-low', 'parcels-fill'];
+          const presentPriorityLayers = priorityLayerIds.filter(id => !!m.getLayer(id));
+          const topHits = presentPriorityLayers.length > 0
+            ? m.queryRenderedFeatures(e.point, { layers: presentPriorityLayers })
+            : [];
           if (topHits.length > 0) return;
 
           const feature = e.features?.[0];
@@ -1051,8 +1053,19 @@ export function useMapInit(
       addGlowLayer('critical', [4, 14, 22], 0.22);
       addWellLayer('critical');
 
-      // Clicking blank map clears both selections
-      m.on('click', () => {
+      // Clicking blank map clears both selections.
+      // Guard: if the click landed on a county fill or a well dot, the layer-
+      // specific handlers have already (or will) handle the selection — don't
+      // clear here. County handlers are synchronous so a naive clear would win;
+      // well handlers are async so they already survived the race, but skipping
+      // the clear also eliminates the brief sidebar-close flash on well clicks.
+      m.on('click', (e) => {
+        const candidateLayers = ['counties-fill', 'wells-critical', 'wells-high', 'wells-medium', 'wells-low'];
+        const presentLayers = candidateLayers.filter(id => !!m.getLayer(id));
+        if (presentLayers.length > 0) {
+          const hits = m.queryRenderedFeatures(e.point, { layers: presentLayers });
+          if (hits.length > 0) return;
+        }
         onSelectWell(null);
         onSelectCounty(null);
       });
