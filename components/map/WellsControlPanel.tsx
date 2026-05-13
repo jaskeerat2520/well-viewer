@@ -10,14 +10,22 @@ import {
   ACTIVITY_HINT,
   ACTIVITY_LABEL,
   ACTIVITY_LEVELS,
+  AUM_OPENING_DISTANCE_LABEL,
   COLOR_MODE_LABEL,
+  HAZARD_FLAG_COLOR,
+  HAZARD_FLAG_HINT,
+  HAZARD_FLAG_LABEL,
   LAND_COVER_CODES,
   PRIORITY_ORDER,
   RS_FLAG_COLOR,
   RS_FLAG_LABEL,
+  TRI_DISTANCE_LABEL,
   WELLS_TABS,
+  type AumOpeningDistance,
   type ColorMode,
+  type HazardFlag,
   type RsFlag,
+  type TriDistance,
 } from '@/lib/mapExpressions';
 
 interface Props {
@@ -44,9 +52,16 @@ export default function WellsControlPanel({ filters, onFilterChange }: Props) {
   const landCoverFilter = useMapStore((s) => s.landCoverFilter);
   const toggleLandCover = useMapStore((s) => s.toggleLandCover);
   const resetLandCover = useMapStore((s) => s.resetLandCover);
+  const hazardFlags = useMapStore((s) => s.hazardFlags);
+  const toggleHazardFlag = useMapStore((s) => s.toggleHazardFlag);
+  const clearHazardFlags = useMapStore((s) => s.clearHazardFlags);
+  const aumOpeningDistance = useMapStore((s) => s.aumOpeningDistance);
+  const setAumOpeningDistance = useMapStore((s) => s.setAumOpeningDistance);
+  const triDistance = useMapStore((s) => s.triDistance);
+  const setTriDistance = useMapStore((s) => s.setTriDistance);
 
   return (
-    <div className="flex flex-col gap-1 bg-black/70 rounded p-2 border border-white/10 w-56">
+    <div className="flex flex-col gap-1 bg-black/70 rounded p-2 border border-white/10 w-64">
       <div className="flex gap-0.5 mb-1 bg-black/60 rounded p-0.5">
         {WELLS_TABS.map((t) => {
           const active = wellsTab === t.key;
@@ -55,12 +70,13 @@ export default function WellsControlPanel({ filters, onFilterChange }: Props) {
             (t.key === 'activity' && activityFilters.size < ACTIVITY_LEVELS.length) ||
             (t.key === 'color'    && colorMode !== 'priority') ||
             (t.key === 'flags'    && (rsFlags.size > 0 || orphansOnly)) ||
+            (t.key === 'hazards'  && (hazardFlags.size > 0 || aumOpeningDistance !== 'any' || triDistance !== 'any')) ||
             (t.key === 'land'     && landCoverFilter !== 'all');
           return (
             <button
               key={t.key}
               onClick={() => setWellsTab(t.key)}
-              className="relative flex-1 min-w-0 px-1 py-1 rounded text-[10px] font-semibold capitalize transition-colors truncate"
+              className="relative flex-1 min-w-0 px-1 py-1 rounded text-[10px] font-semibold capitalize transition-colors"
               style={{
                 backgroundColor: active ? '#fff' : 'transparent',
                 color: active ? '#000' : '#9ca3af',
@@ -232,6 +248,76 @@ export default function WellsControlPanel({ filters, onFilterChange }: Props) {
               <span className="text-[10px] opacity-70">{orphansOnly ? '50K' : ''}</span>
             </button>
           </div>
+        </div>
+      )}
+
+      {wellsTab === 'hazards' && (
+        <div className="flex flex-col gap-1">
+          {(hazardFlags.size > 0 || aumOpeningDistance !== 'any' || triDistance !== 'any') && (
+            <button
+              onClick={clearHazardFlags}
+              className="self-end text-[10px] text-gray-400 hover:text-white -mb-0.5"
+              title="Clear all hazard filters"
+            >
+              clear
+            </button>
+          )}
+          {(Object.keys(HAZARD_FLAG_LABEL) as HazardFlag[]).map((flag) => {
+            const active = hazardFlags.has(flag);
+            const color = HAZARD_FLAG_COLOR[flag];
+            return (
+              <button
+                key={flag}
+                onClick={() => toggleHazardFlag(flag)}
+                title={HAZARD_FLAG_HINT[flag]}
+                className="px-2 py-1 rounded text-xs font-medium transition-opacity text-left"
+                style={{
+                  backgroundColor: active ? color : 'transparent',
+                  color: active ? '#000' : color,
+                  border: `1px solid ${color}`,
+                  opacity: active ? 1 : 0.5,
+                }}
+              >
+                {HAZARD_FLAG_LABEL[flag]}
+              </button>
+            );
+          })}
+
+          {/* Distance to nearest mapped abandoned-mine opening — point hazard,
+              distinct from the polygonal AUM zone above. Sentinel 1e9 means
+              "well wasn't scored yet" so the < threshold check filters it out. */}
+          <div className="border-t border-white/10 mt-1 pt-1.5">
+            <label className="text-[10px] text-gray-400 mb-1 block">Mine opening distance</label>
+            <select
+              value={aumOpeningDistance}
+              onChange={(e) => setAumOpeningDistance(e.target.value as AumOpeningDistance)}
+              className="w-full bg-black/60 border border-white/15 rounded px-1.5 py-1 text-[11px] text-white focus:outline-none focus:border-white/40"
+            >
+              {(Object.keys(AUM_OPENING_DISTANCE_LABEL) as AumOpeningDistance[]).map((k) => (
+                <option key={k} value={k}>{AUM_OPENING_DISTANCE_LABEL[k]}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* TRI facility proximity — same dropdown shape as the AUM-opening filter
+              above. Industrial-context filter, not a regulatory hazard, but it
+              lives here because it's the same wells-narrowing-by-distance shape. */}
+          <div className="border-t border-white/10 mt-1 pt-1.5">
+            <label className="text-[10px] text-gray-400 mb-1 block">TRI facility distance</label>
+            <select
+              value={triDistance}
+              onChange={(e) => setTriDistance(e.target.value as TriDistance)}
+              className="w-full bg-black/60 border border-white/15 rounded px-1.5 py-1 text-[11px] text-white focus:outline-none focus:border-white/40"
+            >
+              {(Object.keys(TRI_DISTANCE_LABEL) as TriDistance[]).map((k) => (
+                <option key={k} value={k}>{TRI_DISTANCE_LABEL[k]}</option>
+              ))}
+            </select>
+          </div>
+
+          <p className="text-[10px] text-gray-500 mt-1 leading-tight">
+            ODNR-mapped polygons (gis.ohiodnr.gov). Hazards filter every priority tier — a critical well in a subsidence zone stays visible only when its priority is also on.
+          </p>
         </div>
       )}
 

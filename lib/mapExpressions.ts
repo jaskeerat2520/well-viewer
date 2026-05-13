@@ -13,7 +13,21 @@ export type ColorMode = 'priority' | 'emissions' | 'vegetation' | 'terrain';
 
 export type RsFlag = 'ch4' | 'plume' | 'veg' | 'flat' | 'cluster';
 
-export type WellsTab = 'priority' | 'activity' | 'color' | 'flags' | 'land';
+// ODNR hazard overlays — regulator-mapped polygons (mine subsidence, AML
+// reclamation, state floodplain, DOGRM urban). Distinct from RS flags because
+// they're hard ground-truth from gov't sources, not observational signals;
+// they apply as hard filters to every priority tier including critical.
+export type HazardFlag = 'aum_subsidence' | 'dogrm_urban';
+
+// Distance bucket for nearest mapped abandoned-mine opening.
+export type AumOpeningDistance = 'any' | 'under_500' | 'under_1km' | 'under_5km';
+
+// Distance bucket for nearest active TRI (Toxic Release Inventory) facility.
+// Same value space as AumOpeningDistance — defining as a separate type so
+// future divergence (e.g. an "≤ 10km" bucket only here) doesn't break.
+export type TriDistance = 'any' | 'under_500' | 'under_1km' | 'under_5km';
+
+export type WellsTab = 'priority' | 'activity' | 'color' | 'flags' | 'hazards' | 'land';
 
 export type ActivityLevel = 'active' | 'aging' | 'zombie' | 'paperwork' | 'other';
 
@@ -141,6 +155,68 @@ export const RS_FLAG_EXPR: Record<RsFlag, mapboxgl.Expression> = {
 };
 
 // ────────────────────────────────────────────────────────────────────────
+// ODNR hazard overlays (Tier 1 informational — regulator-mapped polygons)
+// ────────────────────────────────────────────────────────────────────────
+
+export const HAZARD_FLAG_LABEL: Record<HazardFlag, string> = {
+  aum_subsidence: 'Mine subsidence',
+  dogrm_urban:    'DOGRM urban',
+};
+
+// Reuse the colors from the table page's hazard chips so the two views look
+// consistent. amber / pink.
+export const HAZARD_FLAG_COLOR: Record<HazardFlag, string> = {
+  aum_subsidence: '#b45309',
+  dogrm_urban:    '#ec4899',
+};
+
+export const HAZARD_FLAG_HINT: Record<HazardFlag, string> = {
+  aum_subsidence: "Well sits inside a mapped Abandoned Underground Mine (ODNR DGS)",
+  dogrm_urban:    "Well sits inside DOGRM’s regulatory urban-area definition",
+};
+
+export const HAZARD_FLAG_EXPR: Record<HazardFlag, mapboxgl.Expression> = {
+  aum_subsidence: ['==', ['get', 'in_aum_subsidence_zone'], true],
+  dogrm_urban:    ['==', ['get', 'in_dogrm_urban_area'],    true],
+};
+
+export const AUM_OPENING_DISTANCE_LABEL: Record<AumOpeningDistance, string> = {
+  any:        'Mine opening (any)',
+  under_500:  '≤ 0.3 mi',
+  under_1km:  '≤ 0.6 mi',
+  under_5km:  '≤ 3 mi',
+};
+
+export const AUM_OPENING_DISTANCE_METERS: Record<Exclude<AumOpeningDistance, 'any'>, number> = {
+  under_500: 500,
+  under_1km: 1000,
+  under_5km: 5000,
+};
+
+export function aumOpeningDistanceExpr(level: AumOpeningDistance): mapboxgl.Expression | null {
+  if (level === 'any') return null;
+  return ['<', ['coalesce', ['get', 'nearest_aum_opening_m'], 1e9], AUM_OPENING_DISTANCE_METERS[level]];
+}
+
+export const TRI_DISTANCE_LABEL: Record<TriDistance, string> = {
+  any:        'TRI facility (any)',
+  under_500:  '≤ 0.3 mi',
+  under_1km:  '≤ 0.6 mi',
+  under_5km:  '≤ 3 mi',
+};
+
+export const TRI_DISTANCE_METERS: Record<Exclude<TriDistance, 'any'>, number> = {
+  under_500: 500,
+  under_1km: 1000,
+  under_5km: 5000,
+};
+
+export function triDistanceExpr(level: TriDistance): mapboxgl.Expression | null {
+  if (level === 'any') return null;
+  return ['<', ['coalesce', ['get', 'nearest_tri_distance_m'], 1e9], TRI_DISTANCE_METERS[level]];
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Wells card tab metadata
 // ────────────────────────────────────────────────────────────────────────
 
@@ -149,6 +225,7 @@ export const WELLS_TABS: { key: WellsTab; label: string }[] = [
   { key: 'activity', label: 'Activity' },
   { key: 'color',    label: 'Color'    },
   { key: 'flags',    label: 'Flags'    },
+  { key: 'hazards',  label: 'Hazards'  },
   { key: 'land',     label: 'Land'     },
 ];
 

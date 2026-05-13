@@ -4,6 +4,7 @@ import { use, useEffect, useState } from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
+import { celsiusToFahrenheit, celsiusDeltaToFahrenheit } from '@/lib/units';
 import SiteHeader from '@/components/SiteHeader';
 import ImageryComparison from '@/components/ImageryComparison';
 
@@ -673,12 +674,12 @@ export default function WellDetailPage({
                   {/* Thermal */}
                   <div>
                     <h4 className="text-[11px] uppercase tracking-wider text-orange-400 mb-2">Thermal (Landsat 9)</h4>
-                    <KV label="Well temp">{rs.thermal_well_c != null ? `${rs.thermal_well_c.toFixed(1)} °C` : '—'}</KV>
-                    <KV label="Background">{rs.thermal_background_c != null ? `${rs.thermal_background_c.toFixed(1)} °C` : '—'}</KV>
+                    <KV label="Well temp">{rs.thermal_well_c != null ? `${celsiusToFahrenheit(rs.thermal_well_c).toFixed(1)} °F` : '—'}</KV>
+                    <KV label="Background">{rs.thermal_background_c != null ? `${celsiusToFahrenheit(rs.thermal_background_c).toFixed(1)} °F` : '—'}</KV>
                     <KV label="Anomaly Δ">
                       {rs.thermal_anomaly_c != null ? (
                         <span style={{ color: rs.thermal_anomaly_c >= 5 ? '#ef4444' : rs.thermal_anomaly_c >= 2 ? '#fb923c' : '#9ca3af' }}>
-                          {rs.thermal_anomaly_c >= 0 ? '+' : ''}{rs.thermal_anomaly_c.toFixed(2)} °C
+                          {rs.thermal_anomaly_c >= 0 ? '+' : ''}{celsiusDeltaToFahrenheit(rs.thermal_anomaly_c).toFixed(2)} °F
                         </span>
                       ) : '—'}
                     </KV>

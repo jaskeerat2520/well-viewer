@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 import { PRIORITY_COLOR } from '@/lib/types';
@@ -28,6 +28,13 @@ function formatCost(dollars: number | null): string {
 
 interface StatusStat {
   status: string;
+  count: number;
+  median_last_prod: number | null;
+}
+
+interface ProducingBucket {
+  bucket: string;
+  sort_order: number;
   count: number;
 }
 
@@ -89,7 +96,8 @@ function SortHeader({
 
 export default function FactsPage() {
   const [summary, setSummary]     = useState<FactSummary | null>(null);
-  const [statuses, setStatuses]   = useState<StatusStat[]>([]);
+  const [statuses, setStatuses]           = useState<StatusStat[]>([]);
+  const [producingBreakdown, setProducingBreakdown] = useState<ProducingBucket[]>([]);
   const [counties, setCounties]   = useState<CountyRow[]>([]);
   const [sortKey, setSortKey]     = useState<SortKey>('total_wells');
   const [sortDir, setSortDir]     = useState<'asc' | 'desc'>('desc');
@@ -98,16 +106,18 @@ export default function FactsPage() {
 
   useEffect(() => {
     async function load() {
-      const [summaryRes, statusRes, countyRes, costRes] = await Promise.all([
+      const [summaryRes, statusRes, producingRes, countyRes, costRes] = await Promise.all([
         supabase.from('fact_summary').select('*').single(),
         supabase.from('well_status_stats').select('*'),
+        supabase.from('producing_year_breakdown').select('bucket,sort_order,count').order('sort_order'),
         supabase.from('county_map_view').select(
           'county,total_wells,scored_wells,critical_count,high_count,medium_count,low_count,avg_risk_score,in_orphan_program'
         ),
         supabase.from('county_map_view').select('cost_low,cost_mid,cost_high'),
       ]);
-      if (summaryRes.data)  setSummary(summaryRes.data as FactSummary);
-      if (statusRes.data)   setStatuses(statusRes.data as StatusStat[]);
+      if (summaryRes.data)    setSummary(summaryRes.data as FactSummary);
+      if (statusRes.data)     setStatuses(statusRes.data as StatusStat[]);
+      if (producingRes.data)  setProducingBreakdown(producingRes.data as ProducingBucket[]);
       if (countyRes.data)   setCounties(countyRes.data.filter(r => r.county) as CountyRow[]);
       if (costRes.data) {
         const rows = costRes.data as { cost_low: number; cost_mid: number; cost_high: number }[];
@@ -189,6 +199,7 @@ export default function FactsPage() {
                     <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Status</th>
                     <th className="px-4 py-2 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">Count</th>
                     <th className="px-4 py-2 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">% of total</th>
+                    <th className="px-4 py-2 text-right text-xs font-medium text-gray-400 uppercase tracking-wider whitespace-nowrap">Prod. ended</th>
                     <th className="px-4 py-2 w-48"></th>
                   </tr>
                 </thead>
@@ -196,22 +207,63 @@ export default function FactsPage() {
                   {statuses.map(row => {
                     const pct = totalWells > 0 ? (row.count / totalWells) * 100 : 0;
                     const highlight = STATUS_HIGHLIGHT[row.status];
+                    const isProducing = row.status === 'Producing';
+                    const prodCell = isProducing
+                      ? <span className="text-green-400 font-medium">Active</span>
+                      : row.median_last_prod
+                        ? <span className="text-gray-300">~{row.median_last_prod}</span>
+                        : <span className="text-gray-600">—</span>;
+
+                    // Bucket colors: active→green, aging→yellow-green, stale→yellow, zombie→orange, no-record→gray
+                    const BUCKET_COLOR: Record<string, string> = {
+                      'Active (2023–2025)': '#22c55e',
+                      'Aging (2019–2022)':  '#84cc16',
+                      'Stale (2010–2018)':  '#eab308',
+                      'Zombie (pre-2010)':  '#f97316',
+                      'No record':          '#6b7280',
+                    };
+
                     return (
-                      <tr key={row.status} className="hover:bg-gray-800/50">
-                        <td className="px-4 py-2 font-medium" style={{ color: highlight ?? '#fff' }}>
-                          {row.status}
-                        </td>
-                        <td className="px-4 py-2 text-right font-mono">{row.count.toLocaleString()}</td>
-                        <td className="px-4 py-2 text-right text-gray-400">{pct.toFixed(1)}%</td>
-                        <td className="px-4 py-2">
-                          <div className="w-full bg-gray-700 rounded-full h-1.5">
-                            <div
-                              className="h-1.5 rounded-full"
-                              style={{ width: `${Math.min(pct * 3, 100)}%`, backgroundColor: highlight ?? '#4b5563' }}
-                            />
-                          </div>
-                        </td>
-                      </tr>
+                      <React.Fragment key={row.status}>
+                        <tr className="hover:bg-gray-800/50">
+                          <td className="px-4 py-2 font-medium" style={{ color: highlight ?? '#fff' }}>
+                            {row.status}
+                          </td>
+                          <td className="px-4 py-2 text-right font-mono">{row.count.toLocaleString()}</td>
+                          <td className="px-4 py-2 text-right text-gray-400">{pct.toFixed(1)}%</td>
+                          <td className="px-4 py-2 text-right font-mono text-xs">{prodCell}</td>
+                          <td className="px-4 py-2">
+                            <div className="w-full bg-gray-700 rounded-full h-1.5">
+                              <div
+                                className="h-1.5 rounded-full"
+                                style={{ width: `${Math.min(pct * 3, 100)}%`, backgroundColor: highlight ?? '#4b5563' }}
+                              />
+                            </div>
+                          </td>
+                        </tr>
+                        {isProducing && producingBreakdown.map(bucket => {
+                          const bPct = totalWells > 0 ? (bucket.count / totalWells) * 100 : 0;
+                          const bColor = BUCKET_COLOR[bucket.bucket] ?? '#6b7280';
+                          return (
+                            <tr key={bucket.bucket} className="bg-gray-950/60 hover:bg-gray-800/30">
+                              <td className="pl-8 pr-4 py-1.5 text-xs" style={{ color: bColor }}>
+                                <span className="mr-1.5 text-gray-600">└</span>{bucket.bucket}
+                              </td>
+                              <td className="px-4 py-1.5 text-right font-mono text-xs text-gray-300">{bucket.count.toLocaleString()}</td>
+                              <td className="px-4 py-1.5 text-right text-xs text-gray-500">{bPct.toFixed(1)}%</td>
+                              <td className="px-4 py-1.5" />
+                              <td className="px-4 py-1.5">
+                                <div className="w-full bg-gray-800 rounded-full h-1">
+                                  <div
+                                    className="h-1 rounded-full"
+                                    style={{ width: `${Math.min(bPct * 3, 100)}%`, backgroundColor: bColor }}
+                                  />
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </React.Fragment>
                     );
                   })}
                 </tbody>

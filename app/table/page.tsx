@@ -6,10 +6,10 @@ import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabase';
 import { getCached, setCached } from '@/lib/idbCache';
 import { Priority, PRIORITY_COLOR, ADMIN_STATUS_LABEL, ADMIN_STATUS_COLOR, AdminStatus } from '@/lib/types';
-import { formatDistanceUS, metersToMiles, RADIUS_1KM, RADIUS_5KM } from '@/lib/units';
+import { formatDistanceUS, metersToMiles, metersToFeet, RADIUS_1KM, RADIUS_5KM } from '@/lib/units';
 import SiteHeader from '@/components/SiteHeader';
 
-const TABLE_VERSION = 2;
+const TABLE_VERSION = 4;   // bumped 2026-05-05 — added TRI proximity columns
 const STATUSES_VERSION = 2;
 const TTL_24H = 24 * 60 * 60 * 1000;
 
@@ -77,6 +77,15 @@ interface WellTableRow {
   lat: number | null;
   lng: number | null;
   state_code: StateCode | null;
+  // ── ODNR hazard overlays (Tier 1 informational, OH-only). See migration 007. ──
+  in_aum_subsidence_zone: boolean | null;
+  in_state_floodplain:    boolean | null;
+  in_dogrm_urban_area:    boolean | null;
+  nearest_aum_opening_m:  number | null;
+  // ── TRI facility proximity (Tier 1, OH-only). See migration 008. ──
+  nearest_tri_distance_m:     number | null;
+  nearest_tri_facility_name:  string | null;
+  nearest_tri_parent_company: string | null;
 }
 
 type SortCol = keyof WellTableRow;
@@ -103,6 +112,11 @@ export default function TablePage() {
   const [lastProdFilter, setLastProdFilter]             = useState('');     // 'never' | 'before_2000' | '2000_2014' | '2015_2019' | '2020_plus'
   const [yearsInactiveFilter, setYearsInactiveFilter]   = useState('');     // 'under_5' | 'over_5' | 'over_20' | 'over_50'
   const [appalachianOnly, setAppalachianOnly]       = useState(false);
+
+  // ── ODNR hazard filter chips (boolean toggles, OH-only). 2 booleans + 1 distance bucket. ──
+  const [aumZoneOnly,      setAumZoneOnly]      = useState(false);
+  const [dogrmUrbanOnly,   setDogrmUrbanOnly]   = useState(false);
+  const [aumOpeningFilter, setAumOpeningFilter] = useState('');             // '' | 'under_500' | 'under_1km' | 'under_5km'
 
   // Sort
   const [sortCol, setSortCol] = useState<SortCol>('risk_score');
@@ -188,6 +202,9 @@ export default function TablePage() {
       ad:  adminStatusFilter,
       lp:  lastProdFilter,
       yi:  yearsInactiveFilter,
+      au:  aumZoneOnly,
+      du:  dogrmUrbanOnly,
+      ao:  aumOpeningFilter,
       s:   sortCol,
       sd:  sortDir,
       p:   page,
@@ -214,7 +231,10 @@ export default function TablePage() {
           'priority,risk_score,water_risk_score,' +
           'population_risk_score,inactivity_score,nearest_water_distance_m,' +
           'within_protection_zone,operator_status,admin_status,population_within_1km,' +
-          'population_within_5km,years_inactive,state_code',
+          'population_within_5km,years_inactive,state_code,' +
+          'in_aum_subsidence_zone,in_state_floodplain,' +
+          'in_dogrm_urban_area,nearest_aum_opening_m,' +
+          'nearest_tri_distance_m,nearest_tri_facility_name,nearest_tri_parent_company',
           { count: 'exact' }
         );
 
@@ -245,6 +265,13 @@ export default function TablePage() {
       else if (yearsInactiveFilter === 'over_20') query = query.gte('years_inactive', 20);
       else if (yearsInactiveFilter === 'over_50') query = query.gte('years_inactive', 50);
 
+      // ── ODNR hazard-overlay filters (booleans + nearest mine-opening distance). ──
+      if (aumZoneOnly)    query = query.eq('in_aum_subsidence_zone', true);
+      if (dogrmUrbanOnly) query = query.eq('in_dogrm_urban_area',    true);
+      if (aumOpeningFilter === 'under_500')      query = query.lt('nearest_aum_opening_m', 500);
+      else if (aumOpeningFilter === 'under_1km') query = query.lt('nearest_aum_opening_m', 1000);
+      else if (aumOpeningFilter === 'under_5km') query = query.lt('nearest_aum_opening_m', 5000);
+
       query = query.order(sortCol, { ascending: sortDir === 'asc', nullsFirst: false });
       query = query.range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
@@ -263,6 +290,7 @@ export default function TablePage() {
     return () => { cancelled = true; };
   }, [stateFilter, debouncedSearch, countyFilter, appalachianOnly, priorityFilter, statusFilter,
       operatorStatusFilter, adminStatusFilter, lastProdFilter, yearsInactiveFilter,
+      aumZoneOnly, dogrmUrbanOnly, aumOpeningFilter,
       sortCol, sortDir, page]);
 
   function handleSort(col: SortCol) {
@@ -288,6 +316,9 @@ export default function TablePage() {
     setAdminStatusFilter('');
     setLastProdFilter('');
     setYearsInactiveFilter('');
+    setAumZoneOnly(false);
+    setDogrmUrbanOnly(false);
+    setAumOpeningFilter('');
     setPage(0);
     // stateFilter is intentionally NOT cleared — it's a scope, not a filter.
   }
@@ -306,6 +337,10 @@ export default function TablePage() {
     setLastProdFilter('');
     setYearsInactiveFilter('');
     setPriorityFilter([]);       // PA/WV have no risk scores
+    // ODNR hazard overlays are OH-only (sourced from gis.ohiodnr.gov layers).
+    setAumZoneOnly(false);
+    setDogrmUrbanOnly(false);
+    setAumOpeningFilter('');
     setPage(0);
   }
 
@@ -313,7 +348,11 @@ export default function TablePage() {
     return c ? c.charAt(0) + c.slice(1).toLowerCase() : '';
   }
 
-  const hasFilters = !!(search || countyFilter || appalachianOnly || priorityFilter.length || statusFilter || operatorStatusFilter || adminStatusFilter || lastProdFilter || yearsInactiveFilter);
+  const hasFilters = !!(
+    search || countyFilter || appalachianOnly || priorityFilter.length ||
+    statusFilter || operatorStatusFilter || adminStatusFilter || lastProdFilter || yearsInactiveFilter ||
+    aumZoneOnly || dogrmUrbanOnly || aumOpeningFilter
+  );
   const isOhio = stateFilter === 'OH';
 
   // ── Excel export ────────────────────────────────────────────────────────────
@@ -337,7 +376,9 @@ export default function TablePage() {
             'priority,risk_score,water_risk_score,population_risk_score,' +
             'inactivity_score,nearest_water_distance_m,within_protection_zone,' +
             'operator_status,admin_status,population_within_1km,population_within_5km,' +
-            'years_inactive,lat,lng,state_code'
+            'years_inactive,lat,lng,state_code,' +
+            'in_aum_subsidence_zone,in_state_floodplain,' +
+            'in_dogrm_urban_area,nearest_aum_opening_m'
           );
 
         q = q.eq('state_code', stateFilter);
@@ -360,6 +401,13 @@ export default function TablePage() {
         else if (yearsInactiveFilter === 'over_5')  q = q.gte('years_inactive', 5);
         else if (yearsInactiveFilter === 'over_20') q = q.gte('years_inactive', 20);
         else if (yearsInactiveFilter === 'over_50') q = q.gte('years_inactive', 50);
+
+        // ── ODNR hazard-overlay filters (mirror fetchData) ──
+        if (aumZoneOnly)    q = q.eq('in_aum_subsidence_zone', true);
+        if (dogrmUrbanOnly) q = q.eq('in_dogrm_urban_area',    true);
+        if (aumOpeningFilter === 'under_500')      q = q.lt('nearest_aum_opening_m', 500);
+        else if (aumOpeningFilter === 'under_1km') q = q.lt('nearest_aum_opening_m', 1000);
+        else if (aumOpeningFilter === 'under_5km') q = q.lt('nearest_aum_opening_m', 5000);
 
         q = q.order(sortCol, { ascending: sortDir === 'asc', nullsFirst: false });
         q = q.range(from, from + BATCH - 1);
@@ -400,6 +448,15 @@ export default function TablePage() {
         'Depth (ft)':            r.total_depth ?? '',
         'Latitude':              r.lat ?? '',
         'Longitude':             r.lng ?? '',
+        // ── ODNR hazard overlays (Tier 1 informational, OH-only) ──
+        'In AUM Subsidence':     r.in_aum_subsidence_zone ? 'Yes' : '',
+        'In State Floodplain':   r.in_state_floodplain ? 'Yes' : '',
+        'In DOGRM Urban':        r.in_dogrm_urban_area ? 'Yes' : '',
+        'Nearest Mine Opening (ft)': r.nearest_aum_opening_m != null ? Math.round(metersToFeet(r.nearest_aum_opening_m)) : '',
+        // ── TRI facility proximity (industrial-context informational) ──
+        'Nearest TRI (ft)':         r.nearest_tri_distance_m != null ? Math.round(metersToFeet(r.nearest_tri_distance_m)) : '',
+        'Nearest TRI Facility':    r.nearest_tri_facility_name ?? '',
+        'Nearest TRI Parent':      r.nearest_tri_parent_company ?? '',
       }));
 
       const wsWells = XLSX.utils.json_to_sheet(wellsData);
@@ -708,6 +765,24 @@ export default function TablePage() {
         </select>
         )}
 
+        {/* ── ODNR hazard overlays (Tier 1 informational, Ohio-only — sourced from gis.ohiodnr.gov) ── */}
+        {isOhio && <HazardToggle label="Mine subsidence"  color="#b45309" active={aumZoneOnly}    onClick={() => { setAumZoneOnly(v => !v);    setPage(0); }} title="Well sits inside a mapped Abandoned Underground Mine (ODNR DGS)" />}
+        {isOhio && <HazardToggle label="DOGRM urban"      color="#ec4899" active={dogrmUrbanOnly} onClick={() => { setDogrmUrbanOnly(v => !v); setPage(0); }} title="Well sits inside DOGRM's regulatory urban-area definition (tighter than census urban)" />}
+
+        {isOhio && (
+        <select
+          value={aumOpeningFilter}
+          onChange={e => { setAumOpeningFilter(e.target.value); setPage(0); }}
+          className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs focus:outline-none focus:border-gray-400"
+          title="Distance to nearest mapped abandoned-mine opening (point hazard)"
+        >
+          <option value="">Mine opening (any dist)</option>
+          <option value="under_500">≤ 0.3 mi</option>
+          <option value="under_1km">≤ 0.6 mi</option>
+          <option value="under_5km">≤ 3 mi</option>
+        </select>
+        )}
+
         {/* Clear */}
         {hasFilters && (
           <button
@@ -819,6 +894,35 @@ function Col({
     >
       {label}{active ? (dir === 'desc' ? ' ▼' : ' ▲') : ''}
     </th>
+  );
+}
+
+// ── Hazard toggle pill ────────────────────────────────────────────────────────
+// Mirrors the Appalachian-toggle pattern: outlined when off, solid-filled when on.
+// Used for ODNR overlay booleans (mine subsidence, AML cleanup, floodplain, urban).
+
+function HazardToggle({
+  label, color, active, onClick, title,
+}: {
+  label: string;
+  color: string;
+  active: boolean;
+  onClick: () => void;
+  title?: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className="px-2 py-1 rounded text-xs font-medium border transition-colors whitespace-nowrap"
+      style={{
+        borderColor:     color,
+        color:           active ? '#000' : color,
+        backgroundColor: active ? color  : 'transparent',
+      }}
+    >
+      {label}
+    </button>
   );
 }
 

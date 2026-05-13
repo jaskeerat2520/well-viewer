@@ -14,22 +14,12 @@ const NAV_GROUPS: { href: string; label: string }[][] = [
     { href: '/anomalies', label: 'Anomalies' },
   ],
   [
-    { href: '/facts',     label: 'Facts' },
-    { href: '/impact',    label: 'Impact' },
-    { href: '/emissions', label: 'Emissions' },
-    { href: '/stranded',  label: 'Stranded' },
+    { href: '/facts',    label: 'Facts' },
+    { href: '/stranded', label: 'Stranded' },
   ],
   [
     { href: '/methodology', label: 'Methodology' },
     { href: '/about',       label: 'About' },
-  ],
-  // Multi-state expansion (PoC). PA + WV wells are imported but not yet scored;
-  // /states/[state] surfaces them on a focused per-state map; /states/all
-  // overlays all three states on one map.
-  [
-    { href: '/states/all', label: 'All states' },
-    { href: '/states/pa',  label: 'PA' },
-    { href: '/states/wv',  label: 'WV' },
   ],
 ];
 

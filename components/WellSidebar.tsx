@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 import { WellDetail, Priority, PRIORITY_COLOR, CountySummary, NearYouResult, LAND_COVER_LABEL, LAND_COVER_COLOR, LandCoverCode, CH4_SOURCE_COLOR, CH4_SOURCE_LABEL, ADMIN_STATUS_LABEL, ADMIN_STATUS_COLOR, AdminStatus } from '@/lib/types';
-import { formatDistanceUS, metersToFeet, RADIUS_1KM, RADIUS_5KM, RADIUS_10M, RADIUS_30M } from '@/lib/units';
+import { formatDistanceUS, metersToFeet, celsiusDeltaToFahrenheit, RADIUS_1KM, RADIUS_5KM, RADIUS_10M, RADIUS_30M } from '@/lib/units';
 
 // ── Satellite types ────────────────────────────────────────────────────────────
 interface ThumbPair { baseline_url?: string | null; recent_url?: string | null; }
@@ -952,7 +952,7 @@ function RemoteSensingSection({ well }: { well: WellDetail }) {
         <div className="mb-2 text-sm">
           <Row
             label="Thermal Δ"
-            value={`${well.thermal_anomaly_c > 0 ? '+' : ''}${well.thermal_anomaly_c.toFixed(1)} °C`}
+            value={`${well.thermal_anomaly_c > 0 ? '+' : ''}${celsiusDeltaToFahrenheit(well.thermal_anomaly_c).toFixed(1)} °F`}
             highlight={well.thermal_anomaly_c >= 2}
           />
         </div>

@@ -15,6 +15,7 @@ interface SignalRow {
   status: string | null;
   lat: number | null;
   lng: number | null;
+  land_cover: number | null;
   priority: 'critical' | 'high' | null;
   composite_risk_score: number | null;
   water_risk_score: number | null;
@@ -48,12 +49,29 @@ type SignalKey = 'sig_flat' | 'sig_ch4' | 'sig_thermal' | 'sig_terrain_hi' | 'si
 const SIGNAL_META: Record<SignalKey, { label: string; hint: string; color: string }> = {
   sig_flat:         { label: 'Flat',        hint: 'is_artificially_flat — pad vs 1,300 ft surroundings', color: '#fbbf24' },
   sig_ch4:          { label: 'CH4',         hint: 'ch4_is_anomaly — Sentinel-5P column above local bg', color: '#f87171' },
-  sig_thermal:      { label: 'Thermal≥2°C', hint: 'thermal_anomaly_c ≥ 2 — Landsat 9 summer composite', color: '#fb923c' },
+  sig_thermal:      { label: 'Thermal≥3.6°F', hint: 'thermal_anomaly_c ≥ 2 (≥ 3.6 °F Δ) — Landsat 9 summer composite', color: '#fb923c' },
   sig_terrain_hi:   { label: 'Terr≥50',     hint: 'terrain_risk_score ≥ 50',                            color: '#fcd34d' },
   sig_emissions_hi: { label: 'Emis≥50',     hint: 'emissions_risk_score ≥ 50',                          color: '#f43f5e' },
 };
 
 const SIGNAL_KEYS: SignalKey[] = ['sig_flat', 'sig_ch4', 'sig_thermal', 'sig_terrain_hi', 'sig_emissions_hi'];
+
+// WorldCover 2021 land cover classes
+const LAND_COVER_TYPES: Record<number, string> = {
+  10: 'Tree cover',
+  20: 'Shrubland',
+  30: 'Grassland',
+  40: 'Cropland',
+  50: 'Built-up',
+  60: 'Bare/sparse vegetation',
+  70: 'Snow and ice',
+  80: 'Permanent water',
+  90: 'Herbaceous wetland',
+  95: 'Mangroves',
+  100: 'Moss and lichen',
+};
+
+const LAND_COVER_CODES = Object.keys(LAND_COVER_TYPES).map(Number).sort((a, b) => a - b);
 
 function computeSignals(r: SignalRow): Row {
   const sig_flat         = !!r.is_artificially_flat;
@@ -102,7 +120,7 @@ const COLS: { key: SortKey; label: string; title?: string }[] = [
   { key: 'terrain_risk_score',   label: 'Terr',     title: 'Terrain dimension score' },
   { key: 'emissions_risk_score', label: 'Emis',     title: 'Emissions dimension score' },
   { key: 'ch4_anomaly_ratio',    label: 'CH4×',     title: 'ch4_well / ch4_bg — ratio > 1 means above background' },
-  { key: 'thermal_anomaly_c',    label: 'Therm Δ°C',title: 'thermal_well − thermal_bg' },
+  { key: 'thermal_anomaly_c',    label: 'Therm Δ°F',title: 'thermal_well − thermal_bg (°F Δ)' },
   { key: 'slope_ratio',          label: 'Slope',    title: 'mean_slope_well / mean_slope_bg — low = flat pad' },
 ];
 
@@ -114,6 +132,7 @@ export default function AnomaliesPage() {
   const [search, setSearch]   = useState('');
   const [showCriticalOnly, setShowCriticalOnly] = useState(false);
   const [minSignals, setMinSignals]             = useState(1);
+  const [selectedLandCovers, setSelectedLandCovers] = useState<Set<number>>(new Set());
   const [activeSignals, setActiveSignals]       = useState<Record<SignalKey, boolean>>({
     sig_flat: true, sig_ch4: true, sig_thermal: true, sig_terrain_hi: true, sig_emissions_hi: true,
   });
@@ -151,6 +170,8 @@ export default function AnomaliesPage() {
         const hitCount = activeKeys.reduce((acc, k) => acc + (r[k] ? 1 : 0), 0);
         if (hitCount === 0) return false;
         if (r.signal_count < minSignals) return false;
+        // Land cover filter: if selected, must match one of the selected types
+        if (selectedLandCovers.size > 0 && !selectedLandCovers.has(r.land_cover ?? -1)) return false;
         if (search) {
           const s = search.toLowerCase();
           const hay = [r.api_no, r.well_name, r.county, r.operator]
@@ -170,7 +191,7 @@ export default function AnomaliesPage() {
         }
         return sortDir === 'desc' ? bv - av : av - bv;
       });
-  }, [rows, activeSignals, showCriticalOnly, minSignals, search, sortKey, sortDir]);
+  }, [rows, activeSignals, showCriticalOnly, minSignals, selectedLandCovers, search, sortKey, sortDir]);
 
   // Header counts — independent of sort/search, respects only signal+priority filters
   const totalUniverse = rows.length;
@@ -252,6 +273,31 @@ export default function AnomaliesPage() {
             <option value={2}>≥2</option>
             <option value={3}>≥3</option>
             <option value={4}>≥4</option>
+          </select>
+        </label>
+
+        <span className="text-gray-700">│</span>
+
+        <label className="flex items-center gap-2 text-xs text-gray-400">
+          <span>Land type</span>
+          <select
+            multiple
+            value={Array.from(selectedLandCovers).map(String)}
+            onChange={e => {
+              const selected = new Set<number>();
+              for (const opt of e.currentTarget.selectedOptions) {
+                selected.add(Number(opt.value));
+              }
+              setSelectedLandCovers(selected);
+            }}
+            className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs focus:outline-none focus:border-gray-400"
+            size={Math.min(8, LAND_COVER_CODES.length)}
+          >
+            {LAND_COVER_CODES.map(code => (
+              <option key={code} value={code}>
+                {code}: {LAND_COVER_TYPES[code]}
+              </option>
+            ))}
           </select>
         </label>
 

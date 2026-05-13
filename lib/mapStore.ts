@@ -4,11 +4,14 @@ import {
   ACTIVITY_LEVELS,
   LAND_COVER_CODES,
   type ActivityLevel,
+  type AumOpeningDistance,
   type ColorMode,
   type CountyMetric,
+  type HazardFlag,
   type HoverInfo,
   type RsFlag,
   type SatelliteMode,
+  type TriDistance,
   type WellsTab,
 } from '@/lib/mapExpressions';
 
@@ -21,6 +24,10 @@ interface MapState {
   rsFlags: Set<RsFlag>;
   orphansOnly: boolean;
   landCoverFilter: Set<LandCoverCode> | 'all';
+  // ODNR hazard overlays — apply as hard filters to every priority tier.
+  hazardFlags: Set<HazardFlag>;
+  aumOpeningDistance: AumOpeningDistance;
+  triDistance: TriDistance;
 
   // UI tab + visual mode
   wellsTab: WellsTab;
@@ -32,23 +39,26 @@ interface MapState {
   showWaterSources: boolean;
   showHydrography: boolean;
   showPlumes: boolean;
-  showPadCandidates: boolean;
   showParcels: boolean;
   showSpills: boolean;
   showSchools: boolean;
   showHospitals: boolean;
   showPaOilgas: boolean;
   oilGasSpillsOnly: boolean;
+  // ODNR hazard polygon overlays — each layer_type toggled independently,
+  // but all share one /api/odnr-hazards round trip and one source.
+  showAumMines: boolean;
+  showDogrmUrbanArea: boolean;
 
   // Lazy-load tracking (separate from visibility — first show triggers fetch)
   waterSourcesLoaded: boolean;
   hydrographyLoaded: boolean;
   plumesLoaded: boolean;
-  padCandidatesLoaded: boolean;
   parcelsLoading: boolean;
   spillsLoaded: boolean;
   schoolsLoaded: boolean;
   hospitalsLoaded: boolean;
+  odnrHazardsLoaded: boolean;
 
   // Hover tooltip + bottom load banner
   hoverInfo: HoverInfo | null;
@@ -63,6 +73,10 @@ interface MapState {
   toggleOrphansOnly: () => void;
   toggleLandCover: (code: LandCoverCode) => void;
   resetLandCover: () => void;
+  toggleHazardFlag: (flag: HazardFlag) => void;
+  clearHazardFlags: () => void;
+  setAumOpeningDistance: (level: AumOpeningDistance) => void;
+  setTriDistance: (level: TriDistance) => void;
   setWellsTab: (tab: WellsTab) => void;
   cycleSatellite: () => void;
   setCountyMetric: (metric: CountyMetric) => void;
@@ -70,17 +84,18 @@ interface MapState {
   toggleShowWaterSources: () => void;
   toggleShowHydrography: () => void;
   toggleShowPlumes: () => void;
-  toggleShowPadCandidates: () => void;
   toggleShowParcels: () => void;
   toggleShowSpills: () => void;
   toggleShowSchools: () => void;
   toggleShowHospitals: () => void;
   toggleShowPaOilgas: () => void;
   toggleOilGasSpillsOnly: () => void;
+  toggleShowAumMines: () => void;
+  toggleShowDogrmUrbanArea: () => void;
+  setOdnrHazardsLoaded: (v: boolean) => void;
   setWaterSourcesLoaded: (v: boolean) => void;
   setHydrographyLoaded: (v: boolean) => void;
   setPlumesLoaded: (v: boolean) => void;
-  setPadCandidatesLoaded: (v: boolean) => void;
   setParcelsLoading: (v: boolean) => void;
   setSpillsLoaded: (v: boolean) => void;
   setSchoolsLoaded: (v: boolean) => void;
@@ -95,6 +110,9 @@ export const useMapStore = create<MapState>((set) => ({
   rsFlags: new Set<RsFlag>(),
   orphansOnly: false,
   landCoverFilter: 'all',
+  hazardFlags: new Set<HazardFlag>(),
+  aumOpeningDistance: 'any',
+  triDistance: 'any',
 
   wellsTab: 'priority',
   satellite: 'off',
@@ -104,22 +122,23 @@ export const useMapStore = create<MapState>((set) => ({
   showWaterSources: false,
   showHydrography: false,
   showPlumes: false,
-  showPadCandidates: false,
   showParcels: false,
   showSpills: false,
   showSchools: false,
   showHospitals: false,
   showPaOilgas: false,
   oilGasSpillsOnly: false,
+  showAumMines: false,
+  showDogrmUrbanArea: false,
 
   waterSourcesLoaded: false,
   hydrographyLoaded: false,
   plumesLoaded: false,
-  padCandidatesLoaded: false,
   parcelsLoading: false,
   spillsLoaded: false,
   schoolsLoaded: false,
   hospitalsLoaded: false,
+  odnrHazardsLoaded: false,
 
   hoverInfo: null,
   loadStatus: 'Loading critical wells…',
@@ -161,6 +180,21 @@ export const useMapStore = create<MapState>((set) => ({
     }),
   resetLandCover: () => set({ landCoverFilter: 'all' }),
 
+  toggleHazardFlag: (flag) =>
+    set((s) => {
+      const next = new Set(s.hazardFlags);
+      if (next.has(flag)) next.delete(flag);
+      else next.add(flag);
+      return { hazardFlags: next };
+    }),
+  clearHazardFlags: () => set({
+    hazardFlags: new Set<HazardFlag>(),
+    aumOpeningDistance: 'any',
+    triDistance: 'any',
+  }),
+  setAumOpeningDistance: (level) => set({ aumOpeningDistance: level }),
+  setTriDistance:        (level) => set({ triDistance: level }),
+
   setWellsTab: (tab) => set({ wellsTab: tab }),
 
   cycleSatellite: () =>
@@ -176,12 +210,14 @@ export const useMapStore = create<MapState>((set) => ({
   toggleShowWaterSources: () => set((s) => ({ showWaterSources: !s.showWaterSources })),
   toggleShowHydrography: () => set((s) => ({ showHydrography: !s.showHydrography })),
   toggleShowPlumes: () => set((s) => ({ showPlumes: !s.showPlumes })),
-  toggleShowPadCandidates: () => set((s) => ({ showPadCandidates: !s.showPadCandidates })),
   toggleShowParcels: () => set((s) => ({ showParcels: !s.showParcels })),
   toggleShowSpills: () => set((s) => ({ showSpills: !s.showSpills })),
   toggleShowSchools: () => set((s) => ({ showSchools: !s.showSchools })),
   toggleShowHospitals: () => set((s) => ({ showHospitals: !s.showHospitals })),
   toggleShowPaOilgas: () => set((s) => ({ showPaOilgas: !s.showPaOilgas })),
+  toggleShowAumMines:        () => set((s) => ({ showAumMines:        !s.showAumMines        })),
+  toggleShowDogrmUrbanArea:  () => set((s) => ({ showDogrmUrbanArea:  !s.showDogrmUrbanArea  })),
+  setOdnrHazardsLoaded:      (v) => set({ odnrHazardsLoaded: v }),
   // Flipping the oil/gas filter invalidates the cached source data (different
   // feature set), so spillsLoaded resets and the WellMap effect re-fetches.
   toggleOilGasSpillsOnly: () =>
@@ -190,7 +226,6 @@ export const useMapStore = create<MapState>((set) => ({
   setWaterSourcesLoaded: (v) => set({ waterSourcesLoaded: v }),
   setHydrographyLoaded: (v) => set({ hydrographyLoaded: v }),
   setPlumesLoaded: (v) => set({ plumesLoaded: v }),
-  setPadCandidatesLoaded: (v) => set({ padCandidatesLoaded: v }),
   setParcelsLoading: (v) => set({ parcelsLoading: v }),
   setSpillsLoaded: (v) => set({ spillsLoaded: v }),
   setSchoolsLoaded: (v) => set({ schoolsLoaded: v }),

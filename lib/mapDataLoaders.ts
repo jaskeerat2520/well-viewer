@@ -45,7 +45,7 @@ export async function loadWells(
   while (true) {
     const { data, error } = await supabase
       .from('well_map_view')
-      .select('api_no, lat, lng, priority, risk_score, land_cover, emissions_risk_score, vegetation_risk_score, terrain_risk_score, ch4_is_anomaly, ch4_signal_source, is_artificially_flat, veg_anomaly_detected, cluster_neighbor_count, operator_status, admin_status, status, last_nonzero_production_year')
+      .select('api_no, lat, lng, priority, risk_score, land_cover, emissions_risk_score, vegetation_risk_score, terrain_risk_score, ch4_is_anomaly, ch4_signal_source, is_artificially_flat, veg_anomaly_detected, cluster_neighbor_count, operator_status, admin_status, status, last_nonzero_production_year, in_aum_subsidence_zone, in_aml_project, in_state_floodplain, in_dogrm_urban_area, nearest_aum_opening_m, nearest_tri_distance_m, nearest_tri_facility_name, nearest_tri_parent_company')
       .in('priority', priorities)
       .range(page * PAGE, (page + 1) * PAGE - 1);
 
@@ -73,6 +73,18 @@ export async function loadWells(
           admin_status:            row.admin_status ?? '',
           activity:                classifyActivity(row.status ?? null, row.last_nonzero_production_year ?? null),
           county:                  '',
+          // ── ODNR hazard overlays (Tier 1, OH-only). See migration 007. ──
+          // Defaulting numbers to a sentinel large enough that the "≤ X m"
+          // filter never matches when scoring hasn't run for the well.
+          in_aum_subsidence_zone:  row.in_aum_subsidence_zone ?? false,
+          in_aml_project:          row.in_aml_project ?? false,
+          in_state_floodplain:     row.in_state_floodplain ?? false,
+          in_dogrm_urban_area:     row.in_dogrm_urban_area ?? false,
+          nearest_aum_opening_m:   row.nearest_aum_opening_m ?? 1e9,
+          // ── TRI facility proximity (Tier 1, OH-only). See migration 008. ──
+          nearest_tri_distance_m:     row.nearest_tri_distance_m     ?? 1e9,
+          nearest_tri_facility_name:  row.nearest_tri_facility_name  ?? '',
+          nearest_tri_parent_company: row.nearest_tri_parent_company ?? '',
         },
       });
     }
@@ -165,19 +177,6 @@ export async function loadPlumes(m: mapboxgl.Map): Promise<boolean> {
   }
 }
 
-export async function loadPadCandidates(m: mapboxgl.Map): Promise<boolean> {
-  try {
-    const res = await fetch('/api/pad-candidates');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const geojson: GeoJSON.FeatureCollection = await res.json();
-    (m.getSource('pad-candidates') as mapboxgl.GeoJSONSource)?.setData(geojson);
-    return true;
-  } catch (err) {
-    console.error('[pad-candidates]', err);
-    return false;
-  }
-}
-
 export async function loadSchools(m: mapboxgl.Map): Promise<boolean> {
   try {
     const res = await fetch('/api/schools');
@@ -200,6 +199,23 @@ export async function loadHospitals(m: mapboxgl.Map): Promise<boolean> {
     return true;
   } catch (err) {
     console.error('[hospitals]', err);
+    return false;
+  }
+}
+
+// ODNR hazard polygon overlays — single API call returns all four layer_types
+// (aum_mine / aml_project / amlis_area / state_floodplain / dogrm_urban_area)
+// in one FeatureCollection. The map's per-layer fill/outline pairs filter on
+// `layer_type` so each type toggles independently.
+export async function loadOdnrHazards(m: mapboxgl.Map): Promise<boolean> {
+  try {
+    const res = await fetch('/api/odnr-hazards');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const geojson: GeoJSON.FeatureCollection = await res.json();
+    (m.getSource('odnr-hazards') as mapboxgl.GeoJSONSource)?.setData(geojson);
+    return true;
+  } catch (err) {
+    console.error('[odnr-hazards]', err);
     return false;
   }
 }

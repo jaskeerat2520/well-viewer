@@ -8,20 +8,21 @@ import {
   COLOR_MODE_SCORE_FIELD,
   rsScoreColorExpr,
   RS_FLAG_EXPR,
+  HAZARD_FLAG_EXPR,
+  aumOpeningDistanceExpr,
+  triDistanceExpr,
   ACTIVITY_LEVELS,
   PRIORITY_ORDER,
-  countyColorExpression,
 } from '@/lib/mapExpressions';
 import {
-  loadWaterSources,
   loadHydrography,
   loadParcelsByBbox,
   loadParcelsByCounty,
   loadPlumes,
-  loadPadCandidates,
   loadSpills,
   loadSchools,
   loadHospitals,
+  loadOdnrHazards,
 } from '@/lib/mapDataLoaders';
 import { useMapStore } from '@/lib/mapStore';
 import { useMapInit } from '@/components/map/hooks/useMapInit';
@@ -53,20 +54,13 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
   const landCoverFilter   = useMapStore((s) => s.landCoverFilter);
   const satellite         = useMapStore((s) => s.satellite);
   const cycleSatellite    = useMapStore((s) => s.cycleSatellite);
-  const countyMetric      = useMapStore((s) => s.countyMetric);
   const showCounties      = useMapStore((s) => s.showCounties);
-  const showWaterSources  = useMapStore((s) => s.showWaterSources);
-  const waterSourcesLoaded    = useMapStore((s) => s.waterSourcesLoaded);
-  const setWaterSourcesLoaded = useMapStore((s) => s.setWaterSourcesLoaded);
   const showHydrography   = useMapStore((s) => s.showHydrography);
   const hydrographyLoaded     = useMapStore((s) => s.hydrographyLoaded);
   const setHydrographyLoaded  = useMapStore((s) => s.setHydrographyLoaded);
   const showPlumes        = useMapStore((s) => s.showPlumes);
   const plumesLoaded      = useMapStore((s) => s.plumesLoaded);
   const setPlumesLoaded   = useMapStore((s) => s.setPlumesLoaded);
-  const showPadCandidates = useMapStore((s) => s.showPadCandidates);
-  const padCandidatesLoaded    = useMapStore((s) => s.padCandidatesLoaded);
-  const setPadCandidatesLoaded = useMapStore((s) => s.setPadCandidatesLoaded);
   const showSpills        = useMapStore((s) => s.showSpills);
   const oilGasSpillsOnly  = useMapStore((s) => s.oilGasSpillsOnly);
   const spillsLoaded      = useMapStore((s) => s.spillsLoaded);
@@ -84,6 +78,15 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
   const rsFlags           = useMapStore((s) => s.rsFlags);
   const activityFilters   = useMapStore((s) => s.activityFilters);
   const orphansOnly       = useMapStore((s) => s.orphansOnly);
+  const hazardFlags        = useMapStore((s) => s.hazardFlags);
+  const aumOpeningDistance = useMapStore((s) => s.aumOpeningDistance);
+  const triDistance        = useMapStore((s) => s.triDistance);
+  // ODNR hazard polygon overlays (visible polygons, distinct from the dot
+  // filters above which hide/show wells).
+  const showAumMines           = useMapStore((s) => s.showAumMines);
+  const showDogrmUrbanArea     = useMapStore((s) => s.showDogrmUrbanArea);
+  const odnrHazardsLoaded      = useMapStore((s) => s.odnrHazardsLoaded);
+  const setOdnrHazardsLoaded   = useMapStore((s) => s.setOdnrHazardsLoaded);
 
 
   // Sync filter visibility whenever filters prop changes
@@ -131,6 +134,22 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
         ? null
         : ['in', ['get', 'activity'], ['literal', Array.from(activityFilters)]];
 
+    // Hazard filters (ODNR overlays). Applied as a hard AND on every tier
+    // including critical — these are regulator-mapped polygons, not soft RS
+    // signals, so the user's filter intent is unambiguous: "wells in this
+    // hazard zone, regardless of priority". Multiple hazard booleans AND
+    // together (intersection); the opening-distance expression AND's too.
+    const hazardBoolExprs = Array.from(hazardFlags).map(f => HAZARD_FLAG_EXPR[f]);
+    const openingExpr     = aumOpeningDistanceExpr(aumOpeningDistance);
+    const triExpr         = triDistanceExpr(triDistance);
+    const hazardParts: mapboxgl.Expression[] = [...hazardBoolExprs];
+    if (openingExpr) hazardParts.push(openingExpr);
+    if (triExpr)     hazardParts.push(triExpr);
+    const hazardExpr: mapboxgl.Expression | null =
+      hazardParts.length === 0 ? null
+      : hazardParts.length === 1 ? hazardParts[0]
+      : (['all', ...hazardParts] as mapboxgl.Expression);
+
     PRIORITY_ORDER.forEach(priority => {
       const base: mapboxgl.Expression = ['==', ['get', 'priority'], priority];
       const parts: mapboxgl.Expression[] = [base];
@@ -141,8 +160,10 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
       // hide wells that are already maximally prioritised. Critical therefore
       // ignores RS flags and stays visible whenever its priority filter is on.
       if (flagExpr && priority !== 'critical') parts.push(flagExpr);
-      if (orphanExpr) parts.push(orphanExpr);
+      if (orphanExpr)   parts.push(orphanExpr);
       if (activityExpr) parts.push(activityExpr);
+      // Hazards apply to every tier (see comment above) — no critical carveout.
+      if (hazardExpr)   parts.push(hazardExpr);
       const combined: mapboxgl.Expression =
         parts.length === 1 ? parts[0] : (['all', ...parts] as mapboxgl.Expression);
       const layerId = `wells-${priority}`;
@@ -150,7 +171,7 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
       if (map.current!.getLayer(layerId)) map.current!.setFilter(layerId, combined);
       if (map.current!.getLayer(glowId))  map.current!.setFilter(glowId,  combined);
     });
-  }, [landCoverFilter, rsFlags, orphansOnly, activityFilters]);
+  }, [landCoverFilter, rsFlags, orphansOnly, activityFilters, hazardFlags, aumOpeningDistance, triDistance]);
 
   // Dot recolors by selected RS score; glow stays pinned to PRIORITY_COLOR so
   // critical/high tiers remain recognizable even when most of their dots would
@@ -180,17 +201,6 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
     }
   }, [showPlumes, plumesLoaded]);
 
-  // Toggle pad-detection candidates + lazy-load on first show
-  useEffect(() => {
-    if (!map.current?.getLayer('pad-candidates-dot')) return;
-    const vis = showPadCandidates ? 'visible' : 'none';
-    map.current.setLayoutProperty('pad-candidates-dot',  'visibility', vis);
-    map.current.setLayoutProperty('pad-candidates-glow', 'visibility', vis);
-    if (showPadCandidates && !padCandidatesLoaded) {
-      loadPadCandidates(map.current).then(ok => { if (ok) setPadCandidatesLoaded(true); });
-    }
-  }, [showPadCandidates, padCandidatesLoaded]);
-
   // Toggle Ohio public schools layer + lazy-load on first show
   useEffect(() => {
     if (!map.current?.getLayer('schools-dot')) return;
@@ -210,6 +220,28 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
       loadHospitals(map.current).then(ok => { if (ok) setHospitalsLoaded(true); });
     }
   }, [showHospitals, hospitalsLoaded, setHospitalsLoaded]);
+
+  // Toggle ODNR hazard polygon overlays (2 layer_types share one source).
+  // Each toggle independently flips visibility for its fill+outline pair;
+  // the load fires once when ANY toggle first turns on (one round trip,
+  // two togglable layers).
+  useEffect(() => {
+    const m = map.current;
+    if (!m?.getLayer('odnr-hazards-aum_mine-fill')) return;
+    const layers: Array<[boolean, string]> = [
+      [showAumMines,       'aum_mine'],
+      [showDogrmUrbanArea, 'dogrm_urban_area'],
+    ];
+    for (const [show, key] of layers) {
+      const vis = show ? 'visible' : 'none';
+      m.setLayoutProperty(`odnr-hazards-${key}-fill`,    'visibility', vis);
+      m.setLayoutProperty(`odnr-hazards-${key}-outline`, 'visibility', vis);
+    }
+    const anyOn = layers.some(([show]) => show);
+    if (anyOn && !odnrHazardsLoaded) {
+      loadOdnrHazards(m).then(ok => { if (ok) setOdnrHazardsLoaded(true); });
+    }
+  }, [showAumMines, showDogrmUrbanArea, odnrHazardsLoaded, setOdnrHazardsLoaded]);
 
   // Toggle PA DEP oil & gas locations layer (CDN-served Mapbox tileset, no
   // lazy-load gate — vector tiles arrive as the map renders).
@@ -255,17 +287,6 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
     map.current.setLayoutProperty('counties-selected-glow',    'visibility', vis);
     map.current.setLayoutProperty('counties-selected-outline', 'visibility', vis);
   }, [showCounties]);
-
-  // Toggle water source layer visibility + lazy-load data on first show
-  useEffect(() => {
-    if (!map.current?.getLayer('water-sources-fill')) return;
-    const vis = showWaterSources ? 'visible' : 'none';
-    map.current.setLayoutProperty('water-sources-fill',    'visibility', vis);
-    map.current.setLayoutProperty('water-sources-outline', 'visibility', vis);
-    if (showWaterSources && !waterSourcesLoaded) {
-      loadWaterSources(map.current).then(ok => { if (ok) setWaterSourcesLoaded(true); });
-    }
-  }, [showWaterSources, waterSourcesLoaded]);
 
   // Toggle NHD hydrography (rivers + lakes) + lazy-load on first show
   useEffect(() => {
@@ -358,15 +379,6 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
   }, [showParcels, selectedCounty?.county]);
 
 
-  // Recolor county choropleth when metric changes
-  useEffect(() => {
-    if (!map.current?.getLayer('counties-fill')) return;
-    map.current.setPaintProperty(
-      'counties-fill',
-      'fill-color',
-      countyColorExpression(countyMetric)
-    );
-  }, [countyMetric]);
 
   return (
     <div className="relative w-full h-full">

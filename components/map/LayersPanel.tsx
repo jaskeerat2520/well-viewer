@@ -1,6 +1,6 @@
 import { PRIORITY_COLOR, type CountySummary } from '@/lib/types';
 import { useMapStore } from '@/lib/mapStore';
-import { COUNTY_METRIC_LABELS, type CountyMetric } from '@/lib/mapExpressions';
+import { COUNTY_METRIC_LABELS, HAZARD_FLAG_COLOR, type CountyMetric } from '@/lib/mapExpressions';
 
 const PARCELS_PMTILES_URL = process.env.NEXT_PUBLIC_PARCELS_PMTILES_URL;
 const PARCELS_USE_PMTILES = !!PARCELS_PMTILES_URL;
@@ -18,10 +18,6 @@ export default function LayersPanel({ selectedCounty }: Props) {
   const countyMetric = useMapStore((s) => s.countyMetric);
   const setCountyMetric = useMapStore((s) => s.setCountyMetric);
 
-  const showWaterSources = useMapStore((s) => s.showWaterSources);
-  const toggleShowWaterSources = useMapStore((s) => s.toggleShowWaterSources);
-  const waterSourcesLoaded = useMapStore((s) => s.waterSourcesLoaded);
-
   const showHydrography = useMapStore((s) => s.showHydrography);
   const toggleShowHydrography = useMapStore((s) => s.toggleShowHydrography);
   const hydrographyLoaded = useMapStore((s) => s.hydrographyLoaded);
@@ -33,10 +29,6 @@ export default function LayersPanel({ selectedCounty }: Props) {
   const showParcels = useMapStore((s) => s.showParcels);
   const toggleShowParcels = useMapStore((s) => s.toggleShowParcels);
   const parcelsLoading = useMapStore((s) => s.parcelsLoading);
-
-  const showPadCandidates = useMapStore((s) => s.showPadCandidates);
-  const toggleShowPadCandidates = useMapStore((s) => s.toggleShowPadCandidates);
-  const padCandidatesLoaded = useMapStore((s) => s.padCandidatesLoaded);
 
   const showSpills = useMapStore((s) => s.showSpills);
   const toggleShowSpills = useMapStore((s) => s.toggleShowSpills);
@@ -54,6 +46,13 @@ export default function LayersPanel({ selectedCounty }: Props) {
   const showHospitals = useMapStore((s) => s.showHospitals);
   const toggleShowHospitals = useMapStore((s) => s.toggleShowHospitals);
   const hospitalsLoaded = useMapStore((s) => s.hospitalsLoaded);
+
+  const showAumMines           = useMapStore((s) => s.showAumMines);
+  const toggleShowAumMines     = useMapStore((s) => s.toggleShowAumMines);
+  const showDogrmUrbanArea     = useMapStore((s) => s.showDogrmUrbanArea);
+  const toggleShowDogrmUrbanArea = useMapStore((s) => s.toggleShowDogrmUrbanArea);
+  const odnrHazardsLoaded      = useMapStore((s) => s.odnrHazardsLoaded);
+  const anyHazardOn = showAumMines || showDogrmUrbanArea;
 
   return (
     <div className="flex flex-col bg-black/70 rounded p-2 border border-white/10 w-56">
@@ -115,18 +114,6 @@ export default function LayersPanel({ selectedCounty }: Props) {
       )}
 
       <button
-        onClick={toggleShowWaterSources}
-        className="flex items-center justify-between text-xs py-0.5"
-        style={{ color: showWaterSources ? '#0891b2' : '#9ca3af' }}
-      >
-        <span>Drinking-water zones</span>
-        <span>{showWaterSources ? '●' : '○'}</span>
-      </button>
-      {showWaterSources && !waterSourcesLoaded && (
-        <p className="text-[10px] text-gray-500 pl-1 -mt-0.5">Loading…</p>
-      )}
-
-      <button
         onClick={toggleShowPlumes}
         className="flex items-center justify-between text-xs py-0.5"
         style={{ color: showPlumes ? '#f59e0b' : '#9ca3af' }}
@@ -163,23 +150,6 @@ export default function LayersPanel({ selectedCounty }: Props) {
             : (selectedCounty?.county
                 ? `Showing ${selectedCounty.county}`
                 : 'Click a county or zoom in')}
-        </p>
-      )}
-
-      <button
-        onClick={toggleShowPadCandidates}
-        className="flex items-center justify-between text-xs py-0.5"
-        style={{ color: showPadCandidates ? '#a78bfa' : '#9ca3af' }}
-      >
-        <span>Pad candidates</span>
-        <span>{showPadCandidates ? '●' : '○'}</span>
-      </button>
-      {showPadCandidates && !padCandidatesLoaded && (
-        <p className="text-[10px] text-gray-500 pl-1 -mt-0.5">Loading…</p>
-      )}
-      {showPadCandidates && padCandidatesLoaded && (
-        <p className="text-[10px] text-gray-500 pl-1 -mt-0.5 leading-tight">
-          pad_score &ge; 30 · purple = stronger · click for signals
         </p>
       )}
 
@@ -241,6 +211,38 @@ export default function LayersPanel({ selectedCounty }: Props) {
       {showHospitals && hospitalsLoaded && (
         <p className="text-[10px] text-gray-500 pl-1 -mt-0.5 leading-tight">
           ODH 2023 · 230 geocoded · click for detail
+        </p>
+      )}
+
+      {/* ── ODNR hazards subgroup ─────────────────────────────────────── */}
+      <div className="text-[10px] text-gray-500 uppercase tracking-wider mt-2 mb-0.5">
+        ODNR hazards
+      </div>
+
+      <button
+        onClick={toggleShowAumMines}
+        className="flex items-center justify-between text-xs py-0.5"
+        style={{ color: showAumMines ? HAZARD_FLAG_COLOR.aum_subsidence : '#9ca3af' }}
+      >
+        <span>Mine subsidence</span>
+        <span>{showAumMines ? '●' : '○'}</span>
+      </button>
+
+      <button
+        onClick={toggleShowDogrmUrbanArea}
+        className="flex items-center justify-between text-xs py-0.5"
+        style={{ color: showDogrmUrbanArea ? HAZARD_FLAG_COLOR.dogrm_urban : '#9ca3af' }}
+      >
+        <span>DOGRM urban</span>
+        <span>{showDogrmUrbanArea ? '●' : '○'}</span>
+      </button>
+
+      {anyHazardOn && !odnrHazardsLoaded && (
+        <p className="text-[10px] text-gray-500 pl-1 -mt-0.5">Loading ODNR layers…</p>
+      )}
+      {anyHazardOn && odnrHazardsLoaded && (
+        <p className="text-[10px] text-gray-500 pl-1 -mt-0.5 leading-tight">
+          gis.ohiodnr.gov · click for name &amp; area
         </p>
       )}
 

@@ -19,6 +19,8 @@ import {
 import {
   PARCEL_FILL_COLOR_EXPR,
   LAND_USE_LABEL,
+  HAZARD_FLAG_COLOR,
+  HAZARD_FLAG_LABEL,
 } from '@/lib/mapExpressions';
 import {
   loadWells,
@@ -47,6 +49,57 @@ function escapeHtml(s: unknown): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// AML/AMLIS program-area code → human-readable label. Codes come from OSMRE
+// problem-type taxonomy as used by Ohio DMRM. Show the code if unrecognized.
+const AML_PROGAREA_LABEL: Record<string, string> = {
+  SGA: 'Subsidence / Generated Acid',
+  SEA: 'Surface / Erosion / Subsidence',
+  AMA: 'Acid Mine Abatement',
+  CLA: 'Coal Leach Area',
+  PSP: 'Physical Subsidence Program',
+};
+
+type PopupAttrs = Record<string, string | number | null>;
+
+// Mapbox preserves nested objects on GeoJSON sources, but a future migration
+// to vector tiles would stringify them. Guard against both shapes.
+function safeAttrs(raw: unknown): PopupAttrs {
+  if (raw == null) return {};
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw) as PopupAttrs; } catch { return {}; }
+  }
+  if (typeof raw === 'object') return raw as PopupAttrs;
+  return {};
+}
+
+// Layer-type-aware popup body. Floodplain shows FEMA zone classification;
+// AML projects show project number + program area + AMLIS cross-reference.
+// Other layers fall back to the simple name + area popup.
+function hazardPopupHtml(props: Record<string, unknown>): string {
+  const layerType = String(props.layer_type ?? '');
+  const name      = escapeHtml(props.name);
+  const area      = Number(props.area_km2);
+  const areaLine  = isFinite(area) && area > 0
+    ? `<div style="color:#9ca3af">Area: <span style="color:#fff">${area.toFixed(2)} km²</span></div>` : '';
+  const attrs = safeAttrs(props.attrs);
+
+  const layerLabelMap: Record<string, string> = {
+    aum_mine:         'Abandoned underground mine',
+    dogrm_urban_area: 'DOGRM regulatory urban area',
+  };
+  const layerLabel = layerLabelMap[layerType] ?? layerType;
+
+  // Default: simple name + area for AUM mines and DOGRM urban
+  return `
+    <div style="font-size:12px">
+      <div style="font-weight:600;margin-bottom:4px;color:#fff">${name || layerLabel}</div>
+      <div style="color:#9ca3af">Layer: <span style="color:#fff">${escapeHtml(layerType)}</span></div>
+      ${areaLine}
+      <div style="color:#6b7280;margin-top:4px;font-size:10px">gis.ohiodnr.gov</div>
+    </div>
+  `;
 }
 
 // Owns the imperative Mapbox lifecycle: map creation, all source/layer
@@ -193,15 +246,8 @@ export function useMapInit(
           type: 'fill',
           source: 'counties',
           paint: {
-            'fill-color': [
-              'interpolate', ['linear'],
-              ['coalesce', ['get', 'avg_risk_score'], 0],
-              0,  '#1e3a5f',
-              20, '#2563eb',
-              35, '#f97316',
-              50, '#ef4444',
-            ],
-            'fill-opacity': ['interpolate', ['linear'], ['zoom'], 5, 0.45, 10, 0.22],
+            'fill-color': 'rgba(0,0,0,0)',
+            'fill-opacity': 0,
           },
         });
 
@@ -210,9 +256,9 @@ export function useMapInit(
           type: 'line',
           source: 'counties',
           paint: {
-            'line-color': '#94a3b8',
-            'line-opacity': ['interpolate', ['linear'], ['zoom'], 5, 0.3, 10, 0.65],
-            'line-width':   ['interpolate', ['linear'], ['zoom'], 5, 0.5, 10, 1.2],
+            'line-color': '#64748b',
+            'line-opacity': ['interpolate', ['linear'], ['zoom'], 5, 0.5, 10, 0.65],
+            'line-width':   ['interpolate', ['linear'], ['zoom'], 5, 0.5, 10, 1.5],
           },
         });
 
@@ -253,7 +299,7 @@ export function useMapInit(
           // more zoomed in. Guard by checking for higher-priority features at
           // the same point; if any exist, defer to their handlers.
           const topHits = m.queryRenderedFeatures(e.point, {
-            layers: ['methane-plumes-dot', 'oepa-spills-dot', 'schools-dot', 'hospitals-dot', 'pa-oilgas-dot', 'pad-candidates-dot', 'wells-critical', 'wells-high', 'wells-medium', 'wells-low', 'parcels-fill'],
+            layers: ['methane-plumes-dot', 'oepa-spills-dot', 'schools-dot', 'hospitals-dot', 'tri-facilities-dot', 'pa-oilgas-dot', 'pad-candidates-dot', 'wells-critical', 'wells-high', 'wells-medium', 'wells-low', 'parcels-fill'],
           });
           if (topHits.length > 0) return;
 
@@ -703,6 +749,59 @@ export function useMapInit(
       m.on('mouseenter', 'hospitals-dot', () => { m.getCanvas().style.cursor = 'pointer'; });
       m.on('mouseleave', 'hospitals-dot', () => { m.getCanvas().style.cursor = ''; });
 
+      // ── ODNR hazard overlays (AUM mines, DOGRM urban) ──
+      // One source, four fill+outline layer pairs filtered by `layer_type`.
+      // Tier 1 informational — these polygons make the same hazards that the
+      // Hazards filter tab toggles visible on the map itself, so a user can
+      // both narrow the dot set AND see the polygon footprint at the same time.
+      m.addSource('odnr-hazards', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+
+      type HazardKey = 'aum_mine' | 'dogrm_urban_area';
+      const hazardLayerSpecs: { key: HazardKey; filter: mapboxgl.Expression; color: string; opacity: number; label: string }[] = [
+        { key: 'aum_mine',         filter: ['==', ['get', 'layer_type'], 'aum_mine'],         color: HAZARD_FLAG_COLOR.aum_subsidence, opacity: 0.22, label: HAZARD_FLAG_LABEL.aum_subsidence },
+        { key: 'dogrm_urban_area', filter: ['==', ['get', 'layer_type'], 'dogrm_urban_area'], color: HAZARD_FLAG_COLOR.dogrm_urban,    opacity: 0.10, label: HAZARD_FLAG_LABEL.dogrm_urban    },
+      ];
+
+      for (const spec of hazardLayerSpecs) {
+        m.addLayer({
+          id: `odnr-hazards-${spec.key}-fill`,
+          type: 'fill',
+          source: 'odnr-hazards',
+          filter: spec.filter,
+          minzoom: 6,
+          layout: { visibility: 'none' },
+          paint: { 'fill-color': spec.color, 'fill-opacity': spec.opacity },
+        });
+        m.addLayer({
+          id: `odnr-hazards-${spec.key}-outline`,
+          type: 'line',
+          source: 'odnr-hazards',
+          filter: spec.filter,
+          minzoom: 6,
+          layout: { visibility: 'none' },
+          paint: { 'line-color': spec.color, 'line-opacity': 0.65, 'line-width': 0.9 },
+        });
+
+        // Click → layer-type-aware popup. Floodplain shows FEMA zone code +
+        // floodway flag; AML projects show project number + program area +
+        // AMLIS federal cross-reference key. See hazardPopupHtml() above.
+        const fillLayerId = `odnr-hazards-${spec.key}-fill`;
+        m.on('click', fillLayerId, (e) => {
+          const props = e.features?.[0]?.properties;
+          if (!props) return;
+          new mapboxgl.Popup({ maxWidth: '300px' })
+            .setLngLat(e.lngLat)
+            .setHTML(hazardPopupHtml(props))
+            .addTo(m);
+          e.originalEvent.stopPropagation();
+        });
+        m.on('mouseenter', fillLayerId, () => { m.getCanvas().style.cursor = 'pointer'; });
+        m.on('mouseleave', fillLayerId, () => { m.getCanvas().style.cursor = ''; });
+      }
+
       // ── PA DEP Oil & Gas Locations (Mapbox MTS vector tileset) ───────────
       // Independent feed from the `wells` table's PA rows; useful for
       // cross-checking permit/operator/status against PA DEP's published
@@ -759,104 +858,6 @@ export function useMapInit(
       });
       m.on('mouseenter', 'pa-oilgas-dot', () => { m.getCanvas().style.cursor = 'pointer'; });
       m.on('mouseleave', 'pa-oilgas-dot', () => { m.getCanvas().style.cursor = ''; });
-
-      // ── Pad-detection candidates (NAIP NDVI + OSIP edge, pad_score >= 30) ──
-      // Review queue, NOT a composite contributor. ~60% precision at the
-      // strong (>=50) bin; humans triage. Switch to OSIP basemap to verify.
-      m.addSource('pad-candidates', {
-        type: 'geojson',
-        data: { type: 'FeatureCollection', features: [] },
-      });
-
-      m.addLayer({
-        id: 'pad-candidates-glow',
-        type: 'circle',
-        source: 'pad-candidates',
-        layout: { visibility: 'none' },
-        paint: {
-          'circle-color': [
-            'interpolate', ['linear'], ['get', 'pad_score'],
-            30, '#c4b5fd',
-            50, '#8b5cf6',
-            70, '#6d28d9',
-          ],
-          'circle-radius': [
-            'interpolate', ['linear'], ['zoom'],
-            6,  10,
-            10, 22,
-            13, 38,
-          ],
-          'circle-opacity': 0.25,
-          'circle-blur': 1.1,
-        },
-      });
-
-      m.addLayer({
-        id: 'pad-candidates-dot',
-        type: 'circle',
-        source: 'pad-candidates',
-        layout: { visibility: 'none' },
-        paint: {
-          'circle-color': [
-            'interpolate', ['linear'], ['get', 'pad_score'],
-            30, '#c4b5fd',
-            50, '#8b5cf6',
-            70, '#6d28d9',
-          ],
-          'circle-radius': [
-            'interpolate', ['linear'], ['zoom'],
-            6,  ['interpolate', ['linear'], ['get', 'pad_score'], 30, 3, 50, 5, 70, 7],
-            11, ['interpolate', ['linear'], ['get', 'pad_score'], 30, 6, 50, 10, 70, 14],
-          ],
-          'circle-stroke-width': 1.5,
-          'circle-stroke-color': '#000',
-          'circle-opacity': 0.95,
-        },
-      });
-
-      m.on('click', 'pad-candidates-dot', (e) => {
-        const props = e.features?.[0]?.properties;
-        if (!props) return;
-        const fmt = (v: unknown, d = 3) => {
-          const n = Number(v);
-          return isFinite(n) ? n.toFixed(d) : '—';
-        };
-        const signals: string[] = [];
-        if (Number(props.abs_signal)   > 0) signals.push(`abs +${props.abs_signal}`);
-        if (Number(props.delta_signal) > 0) signals.push(`delta +${props.delta_signal}`);
-        if (Number(props.edge_signal)  > 0) signals.push(`edge +${props.edge_signal}`);
-        const lcCode = Number(props.land_cover);
-        const lcLabel = isFinite(lcCode) && lcCode in LAND_COVER_LABEL
-          ? LAND_COVER_LABEL[lcCode as LandCoverCode] : '—';
-        const masked = isFinite(Number(props.pad_score_raw)) &&
-                       Number(props.pad_score) < Number(props.pad_score_raw);
-        const maskNote = masked
-          ? `<div style="color:#fbbf24;margin-top:4px">WorldCover masked: raw was ${props.pad_score_raw}</div>`
-          : '';
-        new mapboxgl.Popup({ maxWidth: '300px' })
-          .setLngLat(e.lngLat)
-          .setHTML(`
-            <div style="font-size:12px">
-              <div style="font-weight:600;margin-bottom:4px">
-                Pad candidate · score ${props.pad_score}
-              </div>
-              <div style="color:#9ca3af">API: <span style="color:#fff">${props.api_no}</span></div>
-              <div style="color:#9ca3af">Operator: <span style="color:#fff">${props.operator ?? '—'}</span></div>
-              <div style="color:#9ca3af">Status: <span style="color:#fff">${props.well_status ?? '—'}</span></div>
-              <div style="color:#9ca3af">Land cover: <span style="color:#fff">${lcLabel}</span></div>
-              <div style="color:#9ca3af;margin-top:4px">Signals: <span style="color:#fff">${signals.join(' · ') || 'none'}</span></div>
-              <div style="color:#9ca3af">NAIP pad NDVI: <span style="color:#fff">${fmt(props.naip_ndvi_pad)}</span></div>
-              <div style="color:#9ca3af">NAIP delta: <span style="color:#fff">${fmt(props.naip_delta)}</span></div>
-              <div style="color:#9ca3af">OSIP edge ratio: <span style="color:#fff">${fmt(props.edge_ratio, 2)}</span></div>
-              <div style="color:#9ca3af;margin-top:4px">Composite risk: <span style="color:#fff">${fmt(props.composite_risk, 1)} (${props.composite_priority ?? '—'})</span></div>
-              ${maskNote}
-            </div>
-          `)
-          .addTo(m);
-        e.originalEvent.stopPropagation();
-      });
-      m.on('mouseenter', 'pad-candidates-dot', () => { m.getCanvas().style.cursor = 'pointer'; });
-      m.on('mouseleave', 'pad-candidates-dot', () => { m.getCanvas().style.cursor = ''; });
 
       // ── Surface parcels ─────────────────────────────────────────────────
       // Two delivery modes, switched by NEXT_PUBLIC_PARCELS_PMTILES_URL:
@@ -932,7 +933,7 @@ export function useMapInit(
         // Defer to higher-priority features (wells, plumes, schools, hospitals,
         // spills) at the same point.
         const topHits = m.queryRenderedFeatures(e.point, {
-          layers: ['methane-plumes-dot', 'oepa-spills-dot', 'schools-dot', 'hospitals-dot', 'pad-candidates-dot', 'wells-critical', 'wells-high', 'wells-medium', 'wells-low'],
+          layers: ['methane-plumes-dot', 'oepa-spills-dot', 'schools-dot', 'hospitals-dot', 'wells-critical', 'wells-high', 'wells-medium', 'wells-low'],
         });
         if (topHits.length > 0) return;
         const props = e.features?.[0]?.properties;

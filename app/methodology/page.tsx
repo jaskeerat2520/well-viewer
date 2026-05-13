@@ -45,8 +45,8 @@ export default function MethodologyPage() {
           <p className="text-xs text-gray-500 uppercase tracking-wider mb-3">Methodology</p>
           <h1 className="text-4xl font-bold mb-4">How we score wells</h1>
           <p className="text-base text-gray-400 leading-relaxed">
-            A walkthrough of the five scoring dimensions, the satellite data sources behind them,
-            and the formulas that produce every number you see in the sidebar.
+            Each well gets a risk score from 0 to 100 based on five factors: water proximity, population nearby,
+            methane emissions, vegetation damage, and terrain. This page explains how each factor works and the data sources we use.
           </p>
         </div>
       </section>
@@ -58,30 +58,30 @@ export default function MethodologyPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
             <a className="text-blue-400 hover:text-blue-300" href="#composite">1 · Composite formula</a>
             <a className="text-blue-400 hover:text-blue-300" href="#priority">2 · Priority tiers</a>
-            <a className="text-blue-400 hover:text-blue-300" href="#water">3 · Water risk (30%)</a>
-            <a className="text-blue-400 hover:text-blue-300" href="#population">4 · Population exposure (20%)</a>
+            <a className="text-blue-400 hover:text-blue-300" href="#water">3 · Water risk (25%)</a>
+            <a className="text-blue-400 hover:text-blue-300" href="#population">4 · Population exposure (15%)</a>
             <a className="text-blue-400 hover:text-blue-300" href="#emissions">5 · Emissions (20%)</a>
-            <a className="text-blue-400 hover:text-blue-300" href="#vegetation">6 · Vegetation (20%)</a>
-            <a className="text-blue-400 hover:text-blue-300" href="#terrain">7 · Terrain (10%)</a>
-            <a className="text-blue-400 hover:text-blue-300" href="#flags">8 · Auxiliary flags</a>
-            <a className="text-blue-400 hover:text-blue-300" href="#operator-cap">9 · Operator status cap</a>
-            <a className="text-blue-400 hover:text-blue-300" href="#caveats">10 · Known caveats</a>
+            <a className="text-blue-400 hover:text-blue-300" href="#vegetation">6 · Vegetation (15%)</a>
+            <a className="text-blue-400 hover:text-blue-300" href="#terrain">7 · Terrain (5%)</a>
+            <a className="text-blue-400 hover:text-blue-300" href="#inactivity">8 · Inactivity (20%)</a>
+            <a className="text-blue-400 hover:text-blue-300" href="#flags">9 · Auxiliary flags</a>
+            <a className="text-blue-400 hover:text-blue-300" href="#policies">10 · Scoring policies</a>
+            <a className="text-blue-400 hover:text-blue-300" href="#caveats">11 · Known caveats</a>
           </div>
         </nav>
 
         {/* 1 · Composite formula */}
         <Section id="composite" title="1 · Composite formula">
           <p>
-            Each scored well gets a <strong>composite risk score</strong> from 0 to 100, computed as the
-            weighted average of up to five dimensional scores. Missing dimensions are renormalized out
-            so wells with partial data are not unfairly penalized.
+            Each well gets a <strong>composite risk score</strong> from 0 to 100 by blending six independent factors.
+            If any factor has no data, that factor is excluded and the others are rescaled — so missing data
+            doesn't penalize a well unfairly.
           </p>
-          <Formula>{`composite = (water·0.30 + population·0.20 + emissions·0.20 + vegetation·0.20 + terrain·0.10)
-            / (sum of weights for dimensions that actually have data)`}</Formula>
+          <Formula>{`composite = (water·0.25 + population·0.15 + emissions·0.20 + vegetation·0.15 + terrain·0.05 + inactivity·0.20)
+            / (sum of weights for factors with actual data)`}</Formula>
           <p>
-            Example: a well with only water, population, and emissions scores (no vegetation or terrain signal)
-            has a denominator of 0.30 + 0.20 + 0.20 = 0.70. Its composite is the weighted sum of those three
-            dimensions, divided by 0.70.
+            Example: if a well has water, population, emissions, and inactivity data but no vegetation or terrain,
+            the denominator is 0.25 + 0.15 + 0.20 + 0.20 = 0.80. The final score normalizes the weighted sum of those four factors by dividing by 0.80.
           </p>
           <p className="text-xs text-gray-500">
             Source: <code className="text-gray-400">compute_composite.py</code>
@@ -91,43 +91,43 @@ export default function MethodologyPage() {
         {/* 2 · Priority tiers */}
         <Section id="priority" title="2 · Priority tiers">
           <p>
-            Composite scores are binned into four tiers. The thresholds are calibrated to the realized
-            distribution of composites across all 131,000 scored wells, not to arbitrary quartiles.
+            The composite score is binned into four priority tiers. The cutoff points are based on the
+            actual distribution of wells in the database (about 104,000 scored), not arbitrary percentiles.
           </p>
           <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
             <table className="w-full text-xs">
               <thead className="bg-gray-900 text-gray-400">
                 <tr>
-                  <th className="px-4 py-2 text-left font-medium uppercase tracking-wider">Tier</th>
-                  <th className="px-3 py-2 text-center font-medium uppercase tracking-wider">Threshold</th>
+                  <th className="px-4 py-2 text-left font-medium uppercase tracking-wider">Priority</th>
+                  <th className="px-3 py-2 text-center font-medium uppercase tracking-wider">Score range</th>
                   <th className="px-4 py-2 text-center font-medium uppercase tracking-wider">Share</th>
-                  <th className="px-4 py-2 text-left font-medium uppercase tracking-wider">Typical count</th>
+                  <th className="px-4 py-2 text-left font-medium uppercase tracking-wider">Well count</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-700">
                 <tr>
                   <td className="px-4 py-2"><Pill color="#ef4444">Critical</Pill></td>
-                  <td className="px-3 py-2 text-center font-mono">composite ≥ 45</td>
-                  <td className="px-4 py-2 text-center">≈ 0.06%</td>
-                  <td className="px-4 py-2">≈ 39 wells</td>
+                  <td className="px-3 py-2 text-center font-mono">≥ 45</td>
+                  <td className="px-4 py-2 text-center">≈ 2%</td>
+                  <td className="px-4 py-2">≈ 2,100</td>
                 </tr>
                 <tr>
                   <td className="px-4 py-2"><Pill color="#f97316">High</Pill></td>
-                  <td className="px-3 py-2 text-center font-mono">composite ≥ 35</td>
-                  <td className="px-4 py-2 text-center">≈ 1.3%</td>
-                  <td className="px-4 py-2">≈ 930 wells</td>
+                  <td className="px-3 py-2 text-center font-mono">≥ 35</td>
+                  <td className="px-4 py-2 text-center">≈ 3%</td>
+                  <td className="px-4 py-2">≈ 3,500</td>
                 </tr>
                 <tr>
                   <td className="px-4 py-2"><Pill color="#eab308">Medium</Pill></td>
-                  <td className="px-3 py-2 text-center font-mono">composite ≥ 25</td>
-                  <td className="px-4 py-2 text-center">≈ 17.6%</td>
-                  <td className="px-4 py-2">≈ 22,000 wells</td>
+                  <td className="px-3 py-2 text-center font-mono">≥ 25</td>
+                  <td className="px-4 py-2 text-center">≈ 21%</td>
+                  <td className="px-4 py-2">≈ 22,000</td>
                 </tr>
                 <tr>
                   <td className="px-4 py-2"><Pill color="#22c55e">Low</Pill></td>
-                  <td className="px-3 py-2 text-center font-mono">composite &lt; 25</td>
-                  <td className="px-4 py-2 text-center">≈ 80%</td>
-                  <td className="px-4 py-2">≈ 108,000 wells</td>
+                  <td className="px-3 py-2 text-center font-mono">&lt; 25</td>
+                  <td className="px-4 py-2 text-center">≈ 74%</td>
+                  <td className="px-4 py-2">≈ 76,000</td>
                 </tr>
               </tbody>
             </table>
@@ -135,14 +135,14 @@ export default function MethodologyPage() {
         </Section>
 
         {/* 3 · Water */}
-        <Section id="water" title="3 · Water risk — 30%">
+        <Section id="water" title="3 · Water risk — 25%">
           <p>
-            Measures how close the well sits to a drinking-water source and whether it falls inside
-            a state-designated protection zone. Water contamination is the loudest public-health argument
-            for plugging, which is why this dimension carries the highest weight.
+            A leaking well near a drinking-water intake is the clearest public-health reason to plug it first.
+            This score measures how close the well sits to registered drinking-water protection zones and, as a fallback,
+            any permanent water body (like a lake or wetland).
           </p>
           <p className="text-xs text-gray-500">
-            Source: Ohio EPA Source Water Assessment Program (SWAP) — 8,307 protection-zone polygons.
+            Source: Ohio EPA Source Water Assessment Program (SWAP) — 8,307 drinking-water protection zones.
           </p>
           <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
             <table className="w-full text-xs">
@@ -154,8 +154,8 @@ export default function MethodologyPage() {
               </thead>
               <tbody className="divide-y divide-gray-700">
                 <tr>
-                  <td className="px-4 py-2">Inside a protection zone (ST_Intersects)</td>
-                  <td className="px-3 py-2 text-center font-mono">100</td>
+                  <td className="px-4 py-2">Inside a protection zone</td>
+                  <td className="px-3 py-2 text-center font-mono">90+</td>
                 </tr>
                 <tr>
                   <td className="px-4 py-2">Within 0.3 mi of a zone</td>
@@ -166,44 +166,52 @@ export default function MethodologyPage() {
                   <td className="px-3 py-2 text-center font-mono">70</td>
                 </tr>
                 <tr>
-                  <td className="px-4 py-2">Within 1.2 mi</td>
-                  <td className="px-3 py-2 text-center font-mono">40</td>
+                  <td className="px-4 py-2">Within 1.9 mi</td>
+                  <td className="px-3 py-2 text-center font-mono">50</td>
                 </tr>
                 <tr>
                   <td className="px-4 py-2">Within 3 mi</td>
+                  <td className="px-3 py-2 text-center font-mono">30</td>
+                </tr>
+                <tr>
+                  <td className="px-4 py-2">Within 6 mi</td>
                   <td className="px-3 py-2 text-center font-mono">15</td>
                 </tr>
                 <tr>
-                  <td className="px-4 py-2">Beyond 3 mi</td>
-                  <td className="px-3 py-2 text-center font-mono">0</td>
+                  <td className="px-4 py-2">Beyond 6 mi</td>
+                  <td className="px-3 py-2 text-center font-mono">5</td>
                 </tr>
               </tbody>
             </table>
           </div>
+          <p className="text-xs text-gray-300 mt-3">
+            <strong>Water-body floor:</strong> Wells that sit inside a lake or wetland (detected via satellite land-cover data) get
+            a minimum water score of 100 (lakes) or 70 (wetlands), bypassing the distance calculation. This is a safety net for major water bodies
+            not registered in the state zone database.
+          </p>
           <p className="text-xs text-gray-500">
-            Source: <code className="text-gray-400">score_wells.py</code> · PostGIS <code className="text-gray-400">ST_DWithin</code>,{' '}
-            <code className="text-gray-400">ST_Intersects</code>, <code className="text-gray-400">&lt;-&gt;</code> KNN on centroids.
+            Source: <code className="text-gray-400">score_wells.py</code>
           </p>
         </Section>
 
         {/* 4 · Population */}
-        <Section id="population" title="4 · Population exposure — 20%">
+        <Section id="population" title="4 · Population exposure — 15%">
           <p>
-            Counts how many people live near the well, using 2020 Census tract centroids. Because
-            tract boundaries are not uniform, the pipeline uses PostGIS intersection with buffered
-            well points rather than a simple nearest-centroid join.
+            Wells near populated areas pose higher risks in case of spills or emissions. This score counts
+            how many people live within 0.6 mi (immediate neighborhood) and 3 mi (surrounding area) of the well,
+            using 2020 Census data scaled by the fraction of each neighborhood that overlaps the well's buffer.
           </p>
           <p className="text-xs text-gray-500">
-            Source: US Census Bureau 2020 tracts (TIGER/Line) — 3,168 Ohio tracts via <code className="text-gray-400">pygris</code>.
+            Source: US Census Bureau 2020 Census tracts — 3,168 Ohio neighborhoods.
           </p>
-          <Formula>{`pop_within_1km  = SUM(tract.pop × (tract ∩ buffer_1km).area / tract.area)
-pop_within_5km  = SUM(tract.pop × (tract ∩ buffer_5km).area / tract.area)
+          <Formula>{`population_0_6mi  = weighted residents within 0.6 mi
+population_3mi    = weighted residents within 3 mi
 
-population_score = f(pop_within_1km, pop_within_5km)`}</Formula>
+population_score = blended function of both buffers`}</Formula>
           <p>
-            Score climbs sharply with 0.6 mi population (direct-exposure risk) and more gradually with
-            3 mi population (regional risk). A well with 500 people inside 0.6 mi typically scores
-            around 80; one with 5,000 inside 3 mi but none inside 0.6 mi scores around 40.
+            The score is sensitive to people within 0.6 mi (immediate danger zone) and somewhat sensitive to
+            people within 3 mi (regional impact). A well with 500 people in the immediate neighborhood (0.6 mi)
+            typically scores around 80. A well with 5,000 people at regional distance (3 mi) but none immediately nearby scores lower, around 40.
           </p>
           <p className="text-xs text-gray-500">
             Source: <code className="text-gray-400">score_population.py</code>
@@ -213,149 +221,130 @@ population_score = f(pop_within_1km, pop_within_5km)`}</Formula>
         {/* 5 · Emissions */}
         <Section id="emissions" title="5 · Emissions — 20%">
           <p>
-            Combines two independent satellite signals: <strong>methane (CH₄)</strong> and <strong>thermal anomaly</strong>.
-            The methane score uses a tiered source-of-truth hierarchy, falling back to lower-resolution
-            sensors only when higher-resolution ones have no coverage.
+            Leaking methane is a climate and safety hazard. This score combines two independent satellite
+            measurements: nearby methane plume detections from aircraft and thermal heat signatures from satellite imagery.
           </p>
 
-          <h3 className="text-sm font-semibold text-white mt-4">CH₄ — three-tier hierarchy</h3>
-          <div className="space-y-3">
-            <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-              <div className="flex items-center gap-2 mb-2">
-                <Pill color="#dc2626">Tier 1</Pill>
-                <span className="font-semibold text-white">Plume proximity</span>
-              </div>
-              <p className="text-xs text-gray-300 leading-relaxed">
-                If the well is within 0.6 mi of a CarbonMapper or MethaneAIR L4 plume detection in the
-                oil-and-gas sector, it scores 60–90 based on plume flux (kg/hr, log-scaled).
-                <br />
-                <code className="text-gray-400">ch4_signal_source</code> = <code className="text-gray-400">plume:carbonmapper</code>{' '}
-                or <code className="text-gray-400">plume:methaneair</code>.
-              </p>
-            </div>
-            <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-              <div className="flex items-center gap-2 mb-2">
-                <Pill color="#f97316">Tier 2</Pill>
-                <span className="font-semibold text-white">MethaneAIR L3 grid</span>
-              </div>
-              <p className="text-xs text-gray-300 leading-relaxed">
-                Otherwise, if the well falls inside a MethaneAIR L3 aircraft footprint, the score is graded
-                linearly on the ~33 ft XCH₄ value between Ohio L3 p50 (score 0) and p95 (score 70).
-                <br />
-                <code className="text-gray-400">ch4_signal_source</code> = <code className="text-gray-400">l3:methaneair</code>.
-              </p>
-            </div>
-            <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-              <div className="flex items-center gap-2 mb-2">
-                <Pill color="#f59e0b">Tier 3</Pill>
-                <span className="font-semibold text-white">Sentinel-5P hotspot fallback</span>
-              </div>
-              <p className="text-xs text-gray-300 leading-relaxed">
-                When neither plume nor L3 data covers the well, the pipeline samples the 2021–2024
-                Sentinel-5P mean over a 3.4 mi buffer (≈ 1 S5P pixel) and compares to the Ohio-wide
-                95th percentile. Below threshold → score 0. At threshold → 50. At the 99th percentile
-                cap → 100. Linearly interpolated between.
-                <br />
-                <code className="text-gray-400">ch4_signal_source</code> = <code className="text-gray-400">l3:s5p_hotspot</code>{' '}
-                or <code className="text-gray-400">l3:s5p_below_threshold</code>.
-              </p>
-            </div>
-          </div>
-
-          <h3 className="text-sm font-semibold text-white mt-6">Thermal — Landsat 9</h3>
-          <p>
-            Stacked on top of the CH₄ score (capped at 100 combined). Compares the well&apos;s 330 ft surface
-            temperature against its 0.6 mi background, averaged over summer 2022–2024, cloud &lt; 20%.
-          </p>
-          <Formula>{`thermal_Δ = LST(buffer_100m) − LST(buffer_1km)`}</Formula>
-          <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+          <h3 className="text-sm font-semibold text-white mt-4">Plume proximity — CarbonMapper and MethaneAIR detections</h3>
+          <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+            <p className="text-xs text-gray-300 leading-relaxed mb-3">
+              When aircraft flyovers detect a methane plume from the oil-and-gas sector, each detection is logged
+              with its location and estimated emission rate (kg/hr). Wells near detected plumes get higher scores.
+            </p>
             <table className="w-full text-xs">
               <thead className="bg-gray-900 text-gray-400">
                 <tr>
-                  <th className="px-4 py-2 text-left font-medium">Δ (°C)</th>
-                  <th className="px-3 py-2 text-center font-medium">Score added</th>
+                  <th className="px-3 py-1 text-left font-medium">Distance from nearest plume</th>
+                  <th className="px-3 py-1 text-center font-medium">Score added</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-700">
-                <tr><td className="px-4 py-2">≥ 2</td><td className="px-3 py-2 text-center font-mono">+20</td></tr>
-                <tr><td className="px-4 py-2">≥ 5</td><td className="px-3 py-2 text-center font-mono">+40</td></tr>
-                <tr><td className="px-4 py-2">≥ 8</td><td className="px-3 py-2 text-center font-mono">+60</td></tr>
+                <tr><td className="px-3 py-1">Within 0.3 mi</td><td className="px-3 py-1 text-center font-mono">+50</td></tr>
+                <tr><td className="px-3 py-1">Within 0.6 mi</td><td className="px-3 py-1 text-center font-mono">+35</td></tr>
+                <tr><td className="px-3 py-1">Within 1.6 mi</td><td className="px-3 py-1 text-center font-mono">+20</td></tr>
+                <tr><td className="px-3 py-1">Within 3 mi</td><td className="px-3 py-1 text-center font-mono">+10</td></tr>
+              </tbody>
+            </table>
+            <p className="text-xs text-gray-400 mt-2">
+              <strong>Large-leak bonus:</strong> if any plume within 3 mi emits ≥1,000 kg/hr (a major leak), add +20.
+            </p>
+          </div>
+
+          <h3 className="text-sm font-semibold text-white mt-6">Thermal signal — Landsat 9 heat</h3>
+          <p className="text-xs text-gray-300">
+            Active venting warms the ground. Landsat 9 measures surface temperature over the well pad
+            (330 ft radius) and compares it to the cooler background (0.6 mi radius), averaged over summer months 2022–2024.
+          </p>
+          <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-900 text-gray-400">
+                <tr>
+                  <th className="px-3 py-1 text-left font-medium">Temperature rise</th>
+                  <th className="px-3 py-1 text-center font-medium">Score added</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-700">
+                <tr><td className="px-3 py-1">≥ 3.6°F warmer</td><td className="px-3 py-1 text-center font-mono">+20</td></tr>
+                <tr><td className="px-3 py-1">≥ 9°F warmer</td><td className="px-3 py-1 text-center font-mono">+40</td></tr>
+                <tr><td className="px-3 py-1">≥ 14°F warmer</td><td className="px-3 py-1 text-center font-mono">+60</td></tr>
               </tbody>
             </table>
           </div>
+          <p className="text-xs text-gray-300 mt-3">
+            Both signals are added together, with a final cap of 100. A well with a nearby plume (+35) and a
+            thermal anomaly of 9°F (+40) would score 75 for emissions.
+          </p>
           <p className="text-xs text-gray-500">
-            Source: <code className="text-gray-400">score_emissions.py</code>,{' '}
-            <code className="text-gray-400">ingest_carbonmapper.py</code>,{' '}
-            <code className="text-gray-400">ingest_methaneair_plumes.py</code>.
+            Source: <code className="text-gray-400">score_emissions.py</code>
           </p>
         </Section>
 
         {/* 6 · Vegetation */}
-        <Section id="vegetation" title="6 · Vegetation — 20%">
+        <Section id="vegetation" title="6 · Vegetation — 15%">
           <p>
-            Detects vegetation die-off and moisture stress around the well using multi-year Sentinel-2 indices.
-            Cropland and built-up land are masked out via ESA WorldCover 2021 so that seasonal harvest cycles
-            and paved areas don&apos;t produce false positives.
+            Wells that leak salt water or brine cause vegetation stress. This score detects dead or dying plants
+            around the well using satellite imagery (Sentinel-2) from 2017–2024. Cropland and cities are masked out
+            so that harvests and paved roads don't trigger false alarms.
           </p>
           <p className="text-xs text-gray-500">
-            Sources: Sentinel-2 MSI (2017–2024), ESA WorldCover 2021.
+            Source: Sentinel-2 satellite imagery (2017–2024), ESA WorldCover 2021 land classification.
           </p>
-          <Formula>{`vegetation_score = min(100,
-    max( NDVI-anomaly-score,
-         NDVI-trend-score    )        # 25 / 50 / 80 based on slope
-  + NDMI-stress-bonus )               # 0 / 10 / 20`}</Formula>
+          <Formula>{`vegetation_score = combination of:
+  • Long-term greenness trend (slope over 7 years)
+  • Sudden drops in greenness (recent anomaly)
+  • Moisture-stress signal around wellhead`}</Formula>
           <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
             <table className="w-full text-xs">
               <thead className="bg-gray-900 text-gray-400">
                 <tr>
-                  <th className="px-4 py-2 text-left font-medium">NDVI trend slope (/yr)</th>
-                  <th className="px-3 py-2 text-center font-medium">Contribution</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-700">
-                <tr><td className="px-4 py-2">&lt; -0.03 (steep multi-year decline)</td><td className="px-3 py-2 text-center font-mono">80</td></tr>
-                <tr><td className="px-4 py-2">&lt; -0.015</td><td className="px-3 py-2 text-center font-mono">50</td></tr>
-                <tr><td className="px-4 py-2">&lt; -0.005</td><td className="px-3 py-2 text-center font-mono">25</td></tr>
-                <tr><td className="px-4 py-2">≥ -0.005 (stable or improving)</td><td className="px-3 py-2 text-center font-mono">0</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <p>
-            NDMI (normalized difference moisture index) adds a bonus when the well&apos;s moisture signal has
-            dropped noticeably from baseline — a signal of brine spill or salt stress around old wellheads.
-          </p>
-          <p className="text-xs text-gray-500">
-            Sources: <code className="text-gray-400">detect_surface_anomalies.py</code>,{' '}
-            <code className="text-gray-400">compute_composite.py</code>.
-          </p>
-        </Section>
-
-        {/* 7 · Terrain */}
-        <Section id="terrain" title="7 · Terrain — 10%">
-          <p>
-            Identifies artificially graded well pads by comparing the well&apos;s immediate 330 ft slope
-            against its 1,300 ft surroundings. Natural terrain does not create sharp local flatness anomalies,
-            so a well pad that is much flatter than its surroundings is almost certainly human-made.
-          </p>
-          <p className="text-xs text-gray-500">
-            Source: USGS 3DEP ~33 ft DEM (tiled collection) via Google Earth Engine.
-          </p>
-          <Formula>{`slope_ratio = mean_slope_well_100m / mean_slope_bg_400m
-is_artificially_flat = (bg_slope > 1.0°)  AND  (slope_ratio < 0.4)`}</Formula>
-          <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
-            <table className="w-full text-xs">
-              <thead className="bg-gray-900 text-gray-400">
-                <tr>
-                  <th className="px-4 py-2 text-left font-medium">Condition</th>
+                  <th className="px-4 py-2 text-left font-medium">Greenness trend</th>
                   <th className="px-3 py-2 text-center font-medium">Score</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-700">
-                <tr><td className="px-4 py-2">ratio &lt; 0.25 (extreme grading)</td><td className="px-3 py-2 text-center font-mono">100</td></tr>
-                <tr><td className="px-4 py-2">ratio &lt; 0.4</td><td className="px-3 py-2 text-center font-mono">70</td></tr>
-                <tr><td className="px-4 py-2">ratio &lt; 0.6</td><td className="px-3 py-2 text-center font-mono">40</td></tr>
-                <tr><td className="px-4 py-2">ratio &lt; 0.8</td><td className="px-3 py-2 text-center font-mono">15</td></tr>
-                <tr><td className="px-4 py-2">no signal (bg flat or high ratio)</td><td className="px-3 py-2 text-center font-mono">0</td></tr>
+                <tr><td className="px-4 py-2">Steep decline (steeper than −0.03/yr)</td><td className="px-3 py-2 text-center font-mono">80</td></tr>
+                <tr><td className="px-4 py-2">Moderate decline (−0.015 to −0.03/yr)</td><td className="px-3 py-2 text-center font-mono">50</td></tr>
+                <tr><td className="px-4 py-2">Mild decline (−0.005 to −0.015/yr)</td><td className="px-3 py-2 text-center font-mono">25</td></tr>
+                <tr><td className="px-4 py-2">Stable or improving</td><td className="px-3 py-2 text-center font-mono">0</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-gray-300 mt-3">
+            A moisture-stress bonus (0 to 20 points) is added when the well pad shows drying out compared to baseline,
+            a sign of salt contamination or brine spill around the wellhead.
+          </p>
+          <p className="text-xs text-gray-500">
+            Source: <code className="text-gray-400">detect_surface_anomalies.py</code>
+          </p>
+        </Section>
+
+        {/* 7 · Terrain */}
+        <Section id="terrain" title="7 · Terrain — 5%">
+          <p>
+            Well pads are often deliberately flattened to create safe working space. This score detects signs of
+            artificial grading by comparing the immediate terrain around the well (330 ft radius) to the surrounding
+            landscape (1,300 ft radius). Natural hills and valleys don't create sharp flat spots; unnatural flatness
+            suggests a human-made pad.
+          </p>
+          <p className="text-xs text-gray-500">
+            Source: USGS 3DEP elevation map (33 ft resolution).
+          </p>
+          <Formula>{`slope_ratio = average slope in 330 ft ring / average slope in 1,300 ft ring
+is_artificially_flat = background slope > 1° AND ratio < 0.4`}</Formula>
+          <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-900 text-gray-400">
+                <tr>
+                  <th className="px-4 py-2 text-left font-medium">Slope ratio</th>
+                  <th className="px-3 py-2 text-center font-medium">Score</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-700">
+                <tr><td className="px-4 py-2">Below 0.25 (extreme grading)</td><td className="px-3 py-2 text-center font-mono">100</td></tr>
+                <tr><td className="px-4 py-2">Below 0.4</td><td className="px-3 py-2 text-center font-mono">70</td></tr>
+                <tr><td className="px-4 py-2">Below 0.6</td><td className="px-3 py-2 text-center font-mono">40</td></tr>
+                <tr><td className="px-4 py-2">Below 0.8</td><td className="px-3 py-2 text-center font-mono">15</td></tr>
+                <tr><td className="px-4 py-2">No artificial flatness detected</td><td className="px-3 py-2 text-center font-mono">0</td></tr>
               </tbody>
             </table>
           </div>
@@ -364,20 +353,47 @@ is_artificially_flat = (bg_slope > 1.0°)  AND  (slope_ratio < 0.4)`}</Formula>
           </p>
         </Section>
 
-        {/* 8 · Flags */}
-        <Section id="flags" title="8 · Auxiliary flags">
+        {/* 8 · Inactivity */}
+        <Section id="inactivity" title="8 · Inactivity — 20%">
           <p>
-            In addition to the five scored dimensions, the map exposes binary flags that can be used
-            to filter wells. Flags are not part of the composite — they are independent signals for
-            hypothesis-driven filtering.
+            The longer a well has been inactive (no recorded production), the more likely it's an orphan candidate
+            needing plugging. This score measures years since the well last produced oil or gas, using production
+            records or the well's completion date as a fallback.
+          </p>
+          <p className="text-xs text-gray-500">
+            Source: <code className="text-gray-400">backfill_production_years.py</code>
+          </p>
+          <Formula>{`inactivity_score = function of years_inactive
+  0 for currently producing (with recent production)
+  Increases toward 100 as years without production rise`}</Formula>
+          <p className="text-xs text-gray-300 mt-3">
+            <strong>Reporting lag adjustment:</strong> Oil and gas production reports arrive 12–18 months late. A well
+            that was actually producing in late 2024 may appear inactive in mid-2026 purely because 2025 data isn't in
+            yet. To absorb this lag, wells with recorded production within the last 2 years score 0 for inactivity,
+            even if technically inactive-looking in the current snapshot.
+          </p>
+          <p className="text-xs text-gray-300">
+            Old wells with no production record and no plug date are assumed to have been abandoned decades ago and score high
+            for inactivity (typically 80–100).
+          </p>
+          <p className="text-xs text-gray-500">
+            Source: <code className="text-gray-400">backfill_production_years.py</code>
+          </p>
+        </Section>
+
+        {/* 9 · Flags */}
+        <Section id="flags" title="9 · Auxiliary flags">
+          <p>
+            In addition to the six scored dimensions, the map exposes binary flags that can be used
+            to filter and explore wells. Flags are not part of the composite score — they are independent signals
+            for diving deeper into specific hypotheses.
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
               <p className="font-semibold text-white mb-1">Clustered (≥ 2 neighbors)</p>
               <p className="text-xs text-gray-300">
-                Well has 2 or more other wells with centroids 33–100 ft away — typical of old infill
-                pads or modern multi-lateral well sites. Computed via a PostGIS self-join with
-                <code className="text-gray-400"> ST_DWithin</code> + exact geodesic distance.
+                Well has 2 or more other wells very close by (within 100 ft) — typical of old infill drilling campaigns
+                or modern multi-lateral (side-by-side) well pads.
               </p>
             </div>
             <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
@@ -418,12 +434,27 @@ is_artificially_flat = (bg_slope > 1.0°)  AND  (slope_ratio < 0.4)`}</Formula>
           </div>
         </Section>
 
-        {/* 9 · Operator cap */}
-        <Section id="operator-cap" title="9 · Operator status cap">
+        {/* 10 · Scoring policies */}
+        <Section id="policies" title="10 · Scoring policies">
           <p>
-            RBDMS tracks a rough operator status for each well. Wells with an active named operator
-            are capped at <Pill color="#eab308">medium</Pill> priority regardless of composite score —
-            they are the operator&apos;s legal responsibility to plug, not a state-funded plugging candidate.
+            In addition to the six scored dimensions, two policy rules shape the final priority tier.
+          </p>
+
+          <h3 className="text-sm font-semibold text-white mt-4">1. Historic-owner floor</h3>
+          <p className="text-xs text-gray-300">
+            When RBDMS lists "HISTORIC OWNER" (the original owner is lost to time), the well is presumed orphaned.
+            These wells are floored to <Pill color="#eab308">medium</Pill> priority even if their raw composite score falls below 25.
+            This recognizes that orphan candidates with zero remote-sensing signals (vegetation, emissions, terrain) would
+            otherwise sink into the green-dot pool. However, wells with a composite of 35+ still bucket to <Pill color="#f97316">high</Pill> or
+            <Pill color="#ef4444">critical</Pill>, following their natural score.
+          </p>
+
+          <h3 className="text-sm font-semibold text-white mt-6">2. Operator status is informational</h3>
+          <p className="text-xs text-gray-300">
+            The database tracks whether a well has a named operator on file. This is useful for filtering
+            (the "Orphans only" flag excludes wells with active named operators) but does <strong>not</strong> cap
+            priority. A producing well with a high composite score stays high or critical, because high environmental risk
+            exists regardless of who is nominally on the operator line.
           </p>
           <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
             <table className="w-full text-xs">
@@ -438,16 +469,16 @@ is_artificially_flat = (bg_slope > 1.0°)  AND  (slope_ratio < 0.4)`}</Formula>
                 <tr>
                   <td className="px-4 py-2"><code className="text-gray-400">named_operator</code></td>
                   <td className="px-4 py-2">Active company on file</td>
-                  <td className="px-3 py-2 text-center text-red-400">No — operator liable</td>
+                  <td className="px-3 py-2 text-center text-gray-300">Any priority by score</td>
                 </tr>
                 <tr>
                   <td className="px-4 py-2"><code className="text-gray-400">historic_owner</code></td>
-                  <td className="px-4 py-2">RBDMS lists &ldquo;HISTORIC OWNER&rdquo; — real owner lost</td>
-                  <td className="px-3 py-2 text-center text-green-400">Yes</td>
+                  <td className="px-4 py-2">RBDMS lists "HISTORIC OWNER"</td>
+                  <td className="px-3 py-2 text-center text-green-400">Yes (floored to medium)</td>
                 </tr>
                 <tr>
                   <td className="px-4 py-2"><code className="text-gray-400">orphan_program</code></td>
-                  <td className="px-4 py-2">Enrolled in Ohio&apos;s Orphan Well Plugging Program</td>
+                  <td className="px-4 py-2">Enrolled in Ohio Orphan Well Program</td>
                   <td className="px-3 py-2 text-center text-green-400">Yes</td>
                 </tr>
               </tbody>
@@ -455,8 +486,8 @@ is_artificially_flat = (bg_slope > 1.0°)  AND  (slope_ratio < 0.4)`}</Formula>
           </div>
         </Section>
 
-        {/* 10 · Caveats */}
-        <Section id="caveats" title="10 · Known caveats">
+        {/* 11 · Caveats */}
+        <Section id="caveats" title="11 · Known caveats">
           <div className="space-y-5">
             <div>
               <p className="font-semibold text-white mb-1">Composite tops out around 56, not 100.</p>
@@ -468,12 +499,12 @@ is_artificially_flat = (bg_slope > 1.0°)  AND  (slope_ratio < 0.4)`}</Formula>
               </p>
             </div>
             <div>
-              <p className="font-semibold text-white mb-1">Surface-anomaly coverage is partial.</p>
+              <p className="font-semibold text-white mb-1">Vegetation coverage is partial.</p>
               <p className="text-xs text-gray-400">
-                Only ≈ 5,000 of the 131,000 scored wells have been analyzed by the Sentinel-2
-                vegetation pipeline so far. Wells without coverage have NULL for{' '}
-                <code className="text-gray-400">veg_anomaly_detected</code>, which means the{' '}
-                &ldquo;Vegetation loss&rdquo; flag only matches the ≈ 484 wells with confirmed detection.
+                Only ≈ 5,000 of the ~104,000 scored wells have been analyzed by the Sentinel-2
+                satellite vegetation pipeline so far. Wells without vegetation data are excluded from that factor
+                (they don't get penalized — the composite just normalizes without it). The "Vegetation loss" filter
+                therefore only matches a small subset of wells with confirmed detection.
               </p>
             </div>
             <div>
@@ -487,13 +518,12 @@ is_artificially_flat = (bg_slope > 1.0°)  AND  (slope_ratio < 0.4)`}</Formula>
               </p>
             </div>
             <div>
-              <p className="font-semibold text-white mb-1">Sentinel-5P can&apos;t see small leaks.</p>
+              <p className="font-semibold text-white mb-1">Aircraft flyovers have limited coverage.</p>
               <p className="text-xs text-gray-400">
-                S5P&apos;s 3.4 mi pixels can only detect plumes above ≈ 100 kg/hr, and only under favorable
-                wind conditions. A well scored 0 on CH₄ via Tier 3 is not necessarily non-emitting —
-                it may be emitting below S5P&apos;s detection threshold. CarbonMapper and MethaneAIR (Tiers
-                1 and 2) can see down to ≈ 10 kg/hr and ≈ 50 kg/hr respectively, but only cover the
-                geographies their campaigns flew.
+                CarbonMapper and MethaneAIR detections come from aircraft campaigns that cover Ohio intermittently.
+                A well with no detected plume nearby may still be leaking — it just hasn&apos;t been overflown yet,
+                or its leak rate is below the detection threshold (typically ~10–50 kg/hr methane). Thermal imagery
+                (Landsat 9) covers every well but only detects heat anomalies from active venting, not slow leaks.
               </p>
             </div>
           </div>
@@ -512,7 +542,7 @@ is_artificially_flat = (bg_slope > 1.0°)  AND  (slope_ratio < 0.4)`}</Formula>
       </section>
 
       <footer className="bg-gray-900 px-6 py-6 border-t border-gray-800 text-center text-xs text-gray-500">
-        <p>Methodology last reviewed 2026-04. Scoring scripts live in the Oil_Well_Scripts repository.</p>
+        <p>Methodology last reviewed 2026-05. Scoring scripts live in the Oil_Well_Scripts repository.</p>
       </footer>
     </div>
   );

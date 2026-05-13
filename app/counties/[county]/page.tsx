@@ -458,8 +458,8 @@ export default function CountyDetailPage({
                 <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-px bg-gray-700 print:bg-white print:grid-cols-3 print:gap-0 print:border print:border-gray-300">
                   <StatCell label="Artificially flat pads"    value={remote.flat_pads}     color="text-amber-400" />
                   <StatCell label="CH4 anomalies"             value={remote.ch4_anomalies} color="text-red-400" />
-                  <StatCell label="Thermal ≥ 2°C"             value={remote.thermal_2c}    color="text-orange-400" />
-                  <StatCell label="Thermal ≥ 5°C (strong)"    value={remote.thermal_5c}    color="text-red-500" />
+                  <StatCell label="Thermal ≥ 3.6°F Δ"          value={remote.thermal_2c}    color="text-orange-400" />
+                  <StatCell label="Thermal ≥ 9°F Δ (strong)"  value={remote.thermal_5c}    color="text-red-500" />
                   <StatCell label="Emissions score ≥ 50"      value={remote.emissions_hi}  color="text-rose-400" />
                   <StatCell label="Terrain score ≥ 50"        value={remote.terrain_hi}    color="text-yellow-400" />
                 </div>

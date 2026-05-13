@@ -103,19 +103,6 @@ export default function AboutPage() {
         </div>
       </section>
 
-      {/* Stats Section */}
-      {!loading && totals && (
-        <section className="max-w-6xl mx-auto px-6 py-16">
-          <h2 className="text-xs text-gray-400 uppercase tracking-wider mb-8 text-center">The Scale of the Crisis</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-            <StatCard label="Unplugged Wells" value={totals.unplugged_wells} color="#ef4444" />
-            <StatCard label="Orphan Wells" value={totals.orphan_wells} color="#fb7185" />
-            <StatCard label="Annual CO₂e (metric tons)" value={totals.annual_co2e_mt} color="#f97316" />
-            <StatCard label={`People within ${RADIUS_5KM}`} value={totals.total_pop_5km} color="#eab308" />
-            <StatCard label="In Drinking Water Zones" value={totals.wells_in_protection_zone} color="#3b82f6" />
-          </div>
-        </section>
-      )}
 
       {/* Why It Matters Section */}
       <section className="bg-gray-900 px-6 py-16 border-t border-gray-800">
@@ -316,11 +303,8 @@ export default function AboutPage() {
             <Link href="/counties" className="px-6 py-2 bg-orange-600 hover:bg-orange-700 rounded font-medium text-sm transition-colors">
               County Breakdown
             </Link>
-            <Link href="/emissions" className="px-6 py-2 bg-yellow-600 hover:bg-yellow-700 rounded font-medium text-sm transition-colors">
-              Emissions Data
-            </Link>
-            <Link href="/impact" className="px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium text-sm transition-colors">
-              Environmental Impact
+            <Link href="/methodology" className="px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium text-sm transition-colors">
+              Methodology
             </Link>
           </div>
         </div>

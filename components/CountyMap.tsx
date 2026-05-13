@@ -38,7 +38,22 @@ interface CountyMapWell {
   status: string | null;
   well_name: string | null;
   admin_status: string | null;
+  land_cover: number | null;
 }
+
+const LAND_COVER_TYPES: Record<number, string> = {
+  10: 'Tree cover',
+  20: 'Shrubland',
+  30: 'Grassland',
+  40: 'Cropland',
+  50: 'Built-up',
+  60: 'Bare/sparse vegetation',
+  70: 'Snow and ice',
+  80: 'Permanent water',
+  90: 'Herbaceous wetland',
+  95: 'Mangroves',
+  100: 'Moss and lichen',
+};
 
 export default function CountyMap({ county }: { county: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -46,6 +61,7 @@ export default function CountyMap({ county }: { county: string }) {
   const [mapLoaded,  setMapLoaded] = useState(false);
   const [wells,      setWells]     = useState<CountyMapWell[]>([]);
   const [loadingMsg, setLoadingMsg] = useState<string>('Loading wells…');
+  const [selectedLandCovers, setSelectedLandCovers] = useState<Set<number>>(new Set());
 
   // Load every scored well in this county (page 1000 at a time).
   useEffect(() => {
@@ -57,7 +73,7 @@ export default function CountyMap({ county }: { county: string }) {
       while (true) {
         const { data, error } = await supabase
           .from('well_map_view')
-          .select('api_no, lat, lng, priority, composite_risk_score, operator, status, well_name, admin_status')
+          .select('api_no, lat, lng, priority, composite_risk_score, operator, status, well_name, admin_status, land_cover')
           .eq('county', county)
           .not('lat', 'is', null)
           .not('lng', 'is', null)
@@ -129,7 +145,12 @@ export default function CountyMap({ county }: { county: string }) {
     const map = mapRef.current;
     if (!map || !mapLoaded || wells.length === 0) return;
 
-    const features: GeoJSON.Feature[] = wells.map(w => ({
+    // Filter wells by land cover if selected
+    const filteredWells = selectedLandCovers.size === 0
+      ? wells
+      : wells.filter(w => selectedLandCovers.has(w.land_cover ?? -1));
+
+    const features: GeoJSON.Feature[] = filteredWells.map(w => ({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: [w.lng, w.lat] },
       properties: {
@@ -140,6 +161,7 @@ export default function CountyMap({ county }: { county: string }) {
         status:       w.status,
         well_name:    w.well_name,
         admin_status: w.admin_status,
+        land_cover:   w.land_cover,
       },
     }));
 
@@ -242,14 +264,18 @@ export default function CountyMap({ county }: { county: string }) {
     // Auto-fit bounds to the county's wells. Only run on the first data load —
     // re-fitting on every update would fight the user's zoom.
     const bounds = new mapboxgl.LngLatBounds();
-    for (const w of wells) bounds.extend([w.lng, w.lat]);
+    for (const w of filteredWells) bounds.extend([w.lng, w.lat]);
     if (!bounds.isEmpty()) {
       map.fitBounds(bounds, { padding: 40, maxZoom: 11, duration: 0 });
     }
-  }, [mapLoaded, wells]);
+  }, [mapLoaded, wells, selectedLandCovers]);
 
-  // Count wells per priority for the legend.
-  const counts = wells.reduce<Record<string, number>>((acc, w) => {
+  // Count wells per priority for the legend (based on filtered wells).
+  const filteredWells = selectedLandCovers.size === 0
+    ? wells
+    : wells.filter(w => selectedLandCovers.has(w.land_cover ?? -1));
+
+  const counts = filteredWells.reduce<Record<string, number>>((acc, w) => {
     const k = w.priority ?? 'unscored';
     acc[k] = (acc[k] ?? 0) + 1;
     return acc;
@@ -262,10 +288,38 @@ export default function CountyMap({ county }: { county: string }) {
         className="w-full h-[420px] rounded border border-gray-800"
       />
 
+      {/* Land type filter */}
+      <div className="absolute top-2 right-2 bg-gray-900/90 border border-gray-700 rounded px-3 py-2 text-[10px] backdrop-blur-sm pointer-events-auto">
+        <label className="flex items-center gap-2 text-gray-300">
+          <span className="text-gray-400 uppercase tracking-wider" style={{ fontSize: '9px' }}>Land type</span>
+          <select
+            multiple
+            value={Array.from(selectedLandCovers).map(String)}
+            onChange={e => {
+              const selected = new Set<number>();
+              for (const opt of e.currentTarget.selectedOptions) {
+                selected.add(Number(opt.value));
+              }
+              setSelectedLandCovers(selected);
+            }}
+            className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs focus:outline-none focus:border-gray-400"
+            size={Math.min(6, Object.keys(LAND_COVER_TYPES).length)}
+          >
+            {Object.entries(LAND_COVER_TYPES)
+              .sort(([a], [b]) => Number(a) - Number(b))
+              .map(([code, name]) => (
+                <option key={code} value={code}>
+                  {code}: {name}
+                </option>
+              ))}
+          </select>
+        </label>
+      </div>
+
       {/* Legend */}
       <div className="absolute top-2 left-2 bg-gray-900/90 border border-gray-700 rounded px-3 py-2 text-[10px] space-y-1 backdrop-blur-sm pointer-events-none">
         <div className="text-gray-400 uppercase tracking-wider mb-1" style={{ fontSize: '9px' }}>
-          {wells.length.toLocaleString()} wells
+          {filteredWells.length.toLocaleString()} / {wells.length.toLocaleString()} wells
         </div>
         {(['critical', 'high', 'medium', 'low'] as Priority[]).map(p => (
           <div key={p} className="flex items-center gap-2">

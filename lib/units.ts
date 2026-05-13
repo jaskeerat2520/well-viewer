@@ -24,6 +24,15 @@ export function formatDistanceUS(meters: number | null | undefined): string {
   return `${mi.toFixed(mi < 10 ? 1 : 0)} mi`;
 }
 
+export function celsiusToFahrenheit(c: number): number {
+  return c * 9 / 5 + 32;
+}
+
+// For temperature deltas (anomalies): no +32 offset, only scale
+export function celsiusDeltaToFahrenheit(delta: number): number {
+  return delta * 9 / 5;
+}
+
 // Fixed radii baked into the scoring pipeline. Keeping these as constants
 // (rather than computing from the metric value at each call site) ensures
 // every page uses the same wording for the same underlying buffer.
