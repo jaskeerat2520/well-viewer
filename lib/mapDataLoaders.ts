@@ -151,12 +151,57 @@ export async function loadParcelsByBbox(m: mapboxgl.Map): Promise<boolean> {
   }
 }
 
-export async function loadParcelsByCounty(m: mapboxgl.Map, county: string): Promise<boolean> {
+// County-wide parcel load. Keyset-paginated so big counties (Cuyahoga ~484K
+// parcels, Hamilton ~353K, Franklin ~328K) don't get silently truncated and
+// don't block the main thread on one giant JSON.parse. Each page is appended
+// to a running accumulator and pushed to the Mapbox source so the user sees
+// coverage grow. `shouldCancel()` lets the caller bail when the user switches
+// counties mid-load.
+export async function loadParcelsByCounty(
+  m: mapboxgl.Map,
+  county: string,
+  shouldCancel: () => boolean = () => false,
+  onProgress: (count: number) => void = () => {},
+): Promise<boolean> {
+  const allFeatures: GeoJSON.Feature[] = [];
+  let afterId = '0';
+
   try {
-    const res = await fetch(`/api/parcels?county=${encodeURIComponent(county)}&limit=100000`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const geojson: GeoJSON.FeatureCollection = await res.json();
-    (m.getSource('parcels') as mapboxgl.GeoJSONSource)?.setData(geojson);
+    // Cap iterations defensively so a runaway loop can't keep paging forever.
+    // 50 pages × 15K = 750K; covers every Ohio county with headroom.
+    for (let i = 0; i < 50; i++) {
+      if (shouldCancel()) return false;
+
+      // Cache key includes a schema version (PARCELS_RPC_VERSION). Bump it
+      // whenever parcels_for_county_page's output shape changes (precision,
+      // simplify tolerance, repaired-vs-filtered geometry, dropped columns)
+      // so stale browser/CDN entries are skipped without manual cache-clear.
+      // Bumps so far: v1 single-shot; v2 paginated; v3 lean+composite-idx;
+      // v4 ST_MakeValid repair.
+      const PARCELS_RPC_VERSION = 4;
+      const url = `/api/parcels?county=${encodeURIComponent(county)}&after_id=${afterId}&v=${PARCELS_RPC_VERSION}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const geojson: GeoJSON.FeatureCollection = await res.json();
+      const nextAfterId = res.headers.get('x-next-after-id') ?? '';
+
+      for (const feat of geojson.features) allFeatures.push(feat);
+
+      // Push the growing collection so the user sees coverage incrementally.
+      // Mapbox treats setData as a swap (whole-collection replace), but the
+      // visual effect of repeated swaps with a growing array is "parcels
+      // filling in" rather than "flash, flash, flash."
+      (m.getSource('parcels') as mapboxgl.GeoJSONSource | undefined)?.setData({
+        type: 'FeatureCollection',
+        features: allFeatures,
+      });
+      onProgress(allFeatures.length);
+
+      // Empty header = drained.
+      if (!nextAfterId) return true;
+      afterId = nextAfterId;
+    }
+    console.warn('[parcels:county] hit page-cap; county has >750K parcels?');
     return true;
   } catch (err) {
     console.error('[parcels:county]', err);

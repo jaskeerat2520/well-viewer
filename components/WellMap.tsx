@@ -324,6 +324,18 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
     m.setLayoutProperty('parcels-fill',    'visibility', vis);
     m.setLayoutProperty('parcels-outline', 'visibility', vis);
 
+    // Zoom gating. A county is a bounded fetch (≤100k parcels in one shot, no
+    // pan/zoom refetch) so it's safe to render the fill at any zoom — and
+    // necessary, because fitBounds(..., maxZoom: 10) lands big counties
+    // (Cuyahoga, Franklin, Hamilton) at z7-8, well below the default z9 gate
+    // that made the loaded data invisible. The outline stays gated at z9
+    // because thin grey lines just disappear at low zoom anyway.
+    // No-county mode stays at z9 — bbox fetches across all of Ohio at z6
+    // would melt the API.
+    const fillMinZoom = selectedCounty?.county ? 5 : 9;
+    m.setLayerZoomRange('parcels-fill',    fillMinZoom, 24);
+    m.setLayerZoomRange('parcels-outline', 9,           24);
+
     // Vector-tile mode: Mapbox handles tile fetching automatically. The county
     // selection becomes a layer filter rather than a refetch — this keeps tile
     // bytes already in cache (highlighting only one county doesn't re-download
@@ -351,8 +363,31 @@ export default function WellMap({ filters, onFilterChange, onSelectWell, onSelec
 
     if (selectedCounty?.county) {
       setParcelsLoading(true);
-      loadParcelsByCounty(m, selectedCounty.county)
-        .finally(() => { if (!cancelled) setParcelsLoading(false); });
+      // Clear any stale parcels from the previous county before paging in the
+      // new one — otherwise the user briefly sees the old county overlaid on
+      // the new one while page 1 is in flight.
+      (m.getSource('parcels') as mapboxgl.GeoJSONSource | undefined)?.setData({
+        type: 'FeatureCollection', features: [],
+      });
+      const countyName = selectedCounty.county;
+      loadParcelsByCounty(
+        m,
+        countyName,
+        () => cancelled,
+        (n) => {
+          // Surface running coverage on the bottom banner so the user sees
+          // progress for big counties (Cuyahoga → ~32 pages × 15K).
+          if (!cancelled) {
+            useMapStore.getState().setLoadStatus(
+              `Loading ${countyName} parcels — ${n.toLocaleString()}…`,
+            );
+          }
+        },
+      ).finally(() => {
+        if (cancelled) return;
+        setParcelsLoading(false);
+        useMapStore.getState().setLoadStatus('');
+      });
       return () => { cancelled = true; };
     }
 
