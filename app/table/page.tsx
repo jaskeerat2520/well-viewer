@@ -9,7 +9,7 @@ import { Priority, PRIORITY_COLOR, ADMIN_STATUS_LABEL, ADMIN_STATUS_COLOR, Admin
 import { formatDistanceUS, metersToMiles, metersToFeet, RADIUS_1KM, RADIUS_5KM } from '@/lib/units';
 import SiteHeader from '@/components/SiteHeader';
 
-const TABLE_VERSION = 4;   // bumped 2026-05-05 — added TRI proximity columns
+const TABLE_VERSION = 5;   // bumped 2026-06-02 — Risk column now shows composite_risk_score (matches priority)
 const STATUSES_VERSION = 2;
 const TTL_24H = 24 * 60 * 60 * 1000;
 
@@ -64,6 +64,7 @@ interface WellTableRow {
   last_active_source: 'prod' | 'compl' | null;
   priority: Priority | null;
   risk_score: number | null;
+  composite_risk_score: number | null;
   water_risk_score: number | null;
   population_risk_score: number | null;
   inactivity_score: number | null;
@@ -105,6 +106,9 @@ export default function TablePage() {
   const [countyFilter, setCountyFilter]             = useState('');
   const [countyQuery, setCountyQuery]               = useState('');
   const [countyOpen, setCountyOpen]                 = useState(false);
+  const [townshipFilter, setTownshipFilter]         = useState('');   // scoped to selected county
+  const [townshipQuery, setTownshipQuery]           = useState('');
+  const [townshipOpen, setTownshipOpen]             = useState(false);
   const [priorityFilter, setPriorityFilter]         = useState<Priority[]>([]);
   const [statusFilter, setStatusFilter]             = useState('');
   const [operatorStatusFilter, setOperatorStatusFilter] = useState('');
@@ -119,12 +123,13 @@ export default function TablePage() {
   const [aumOpeningFilter, setAumOpeningFilter] = useState('');             // '' | 'under_500' | 'under_1km' | 'under_5km'
 
   // Sort
-  const [sortCol, setSortCol] = useState<SortCol>('risk_score');
+  const [sortCol, setSortCol] = useState<SortCol>('composite_risk_score');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
   // Dropdown option lists
-  const [counties, setCounties] = useState<string[]>([]);
-  const [statuses, setStatuses] = useState<string[]>([]);
+  const [counties, setCounties]   = useState<string[]>([]);
+  const [townships, setTownships] = useState<string[]>([]);
+  const [statuses, setStatuses]   = useState<string[]>([]);
 
   // Debounce search input
   const searchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -188,6 +193,45 @@ export default function TablePage() {
     return () => { cancelled = true; };
   }, [stateFilter]);
 
+  // Township list is scoped to the selected county (townships aren't unique
+  // across counties, and a state-wide distinct list would be huge). Reloads
+  // whenever the county changes; cleared when no county is selected.
+  useEffect(() => {
+    let cancelled = false;
+    if (!countyFilter) { setTownships([]); return; }
+    async function loadTownships() {
+      const cacheKey = `table:townships_list:${stateFilter}:${countyFilter}`;
+      const cached = await getCached<string[]>(cacheKey, STATUSES_VERSION, TTL_24H);
+      if (cancelled) return;
+      if (cached) { setTownships(cached); return; }
+      // Paginate to collect distinct townships — a populous county can exceed
+      // the per-request row cap, which would otherwise truncate the list.
+      const set = new Set<string>();
+      let from = 0;
+      const BATCH = 1000;
+      while (true) {
+        const { data, error } = await supabase
+          .from('well_table_view')
+          .select('township')
+          .eq('state_code', stateFilter)
+          .eq('county', countyFilter)
+          .not('township', 'is', null)
+          .order('township')
+          .range(from, from + BATCH - 1);
+        if (cancelled) return;
+        if (error || !data || data.length === 0) break;
+        data.forEach(r => set.add(r.township as string));
+        if (data.length < BATCH) break;
+        from += BATCH;
+      }
+      const list = [...set].sort();
+      setTownships(list);
+      await setCached(cacheKey, STATUSES_VERSION, list);
+    }
+    loadTownships();
+    return () => { cancelled = true; };
+  }, [stateFilter, countyFilter]);
+
   // Fetch paginated/filtered/sorted data
   useEffect(() => {
     let cancelled = false;
@@ -195,6 +239,7 @@ export default function TablePage() {
       stc: stateFilter,
       q:   debouncedSearch,
       c:   countyFilter,
+      tw:  townshipFilter,
       arc: appalachianOnly,
       pri: [...priorityFilter].sort(),
       st:  statusFilter,
@@ -228,7 +273,7 @@ export default function TablePage() {
           'api_no,well_name,county,township,status,operator,well_type,' +
           'in_orphan_program,total_depth,permit_issued,completion_date,' +
           'last_nonzero_production_year,last_active_year,last_active_source,' +
-          'priority,risk_score,water_risk_score,' +
+          'priority,risk_score,composite_risk_score,water_risk_score,' +
           'population_risk_score,inactivity_score,nearest_water_distance_m,' +
           'within_protection_zone,operator_status,admin_status,population_within_1km,' +
           'population_within_5km,years_inactive,state_code,' +
@@ -247,6 +292,7 @@ export default function TablePage() {
       }
       if (countyFilter)                                query = query.eq('county', countyFilter);
       else if (appalachianOnly && stateFilter === 'OH') query = query.in('county', ARC_COUNTIES);
+      if (townshipFilter)        query = query.eq('township', townshipFilter);
       if (priorityFilter.length) query = query.in('priority', priorityFilter);
       if (statusFilter)          query = query.eq('status', statusFilter);
       if (operatorStatusFilter)  query = query.eq('operator_status', operatorStatusFilter);
@@ -288,7 +334,7 @@ export default function TablePage() {
     }
     fetchData();
     return () => { cancelled = true; };
-  }, [stateFilter, debouncedSearch, countyFilter, appalachianOnly, priorityFilter, statusFilter,
+  }, [stateFilter, debouncedSearch, countyFilter, townshipFilter, appalachianOnly, priorityFilter, statusFilter,
       operatorStatusFilter, adminStatusFilter, lastProdFilter, yearsInactiveFilter,
       aumZoneOnly, dogrmUrbanOnly, aumOpeningFilter,
       sortCol, sortDir, page]);
@@ -309,6 +355,9 @@ export default function TablePage() {
     setCountyFilter('');
     setCountyQuery('');
     setCountyOpen(false);
+    setTownshipFilter('');
+    setTownshipQuery('');
+    setTownshipOpen(false);
     setAppalachianOnly(false);
     setPriorityFilter([]);
     setStatusFilter('');
@@ -330,6 +379,9 @@ export default function TablePage() {
     setCountyFilter('');
     setCountyQuery('');
     setCountyOpen(false);
+    setTownshipFilter('');
+    setTownshipQuery('');
+    setTownshipOpen(false);
     setAppalachianOnly(false);
     setStatusFilter('');         // status vocabularies differ across states
     setOperatorStatusFilter(''); // not populated for PA/WV
@@ -349,7 +401,7 @@ export default function TablePage() {
   }
 
   const hasFilters = !!(
-    search || countyFilter || appalachianOnly || priorityFilter.length ||
+    search || countyFilter || townshipFilter || appalachianOnly || priorityFilter.length ||
     statusFilter || operatorStatusFilter || adminStatusFilter || lastProdFilter || yearsInactiveFilter ||
     aumZoneOnly || dogrmUrbanOnly || aumOpeningFilter
   );
@@ -373,7 +425,7 @@ export default function TablePage() {
             'api_no,well_name,county,township,status,operator,well_type,' +
             'in_orphan_program,total_depth,permit_issued,completion_date,' +
             'last_nonzero_production_year,last_active_year,last_active_source,' +
-            'priority,risk_score,water_risk_score,population_risk_score,' +
+            'priority,risk_score,composite_risk_score,water_risk_score,population_risk_score,' +
             'inactivity_score,nearest_water_distance_m,within_protection_zone,' +
             'operator_status,admin_status,population_within_1km,population_within_5km,' +
             'years_inactive,lat,lng,state_code,' +
@@ -386,6 +438,7 @@ export default function TablePage() {
         if (debouncedSearch) q = q.or(`well_name.ilike.%${debouncedSearch}%,api_no.ilike.%${debouncedSearch}%`);
         if (countyFilter)                                 q = q.eq('county', countyFilter);
         else if (appalachianOnly && stateFilter === 'OH') q = q.in('county', ARC_COUNTIES);
+        if (townshipFilter)        q = q.eq('township', townshipFilter);
         if (priorityFilter.length) q = q.in('priority', priorityFilter);
         if (statusFilter)          q = q.eq('status', statusFilter);
         if (operatorStatusFilter)  q = q.eq('operator_status', operatorStatusFilter);
@@ -431,7 +484,7 @@ export default function TablePage() {
         'Operator':              r.operator ?? '',
         'In Orphan Program':     r.in_orphan_program ? 'Yes' : 'No',
         'Priority':              r.priority ?? '',
-        'Risk Score':            r.risk_score ?? '',
+        'Risk Score':            r.composite_risk_score ?? '',
         'Water Risk':            r.water_risk_score ?? '',
         'Population Risk':       r.population_risk_score ?? '',
         'Inactivity Score':      r.inactivity_score ?? '',
@@ -511,6 +564,7 @@ export default function TablePage() {
       const filterLabel = [
         appalachianOnly && stateFilter === 'OH' ? 'appalachian' : '',
         countyFilter    ? countyFilter.toLowerCase() : '',
+        townshipFilter  ? townshipFilter.toLowerCase().replace(/\s+/g, '_') : '',
         priorityFilter.length ? priorityFilter.join('-') : '',
         statusFilter    ? statusFilter.toLowerCase().replace(/\s+/g, '_') : '',
       ].filter(Boolean).join('_');
@@ -524,10 +578,13 @@ export default function TablePage() {
     }
   }
 
-  // When Appalachian toggle is on, only show ARC counties in the dropdown
-  const visibleCounties = appalachianOnly
+  // When Appalachian toggle is on, only show ARC counties in the dropdown.
+  // WV stores county as numeric FIPS codes (001–109) rather than names; drop
+  // those so the dropdown isn't a list of bare numbers.
+  const visibleCounties = (appalachianOnly
     ? counties.filter(c => ARC_COUNTIES.includes(c))
-    : counties;
+    : counties
+  ).filter(c => !/^\d+$/.test(c));
   const totalPages = Math.ceil(total / PAGE_SIZE);
   const startRow   = total === 0 ? 0 : page * PAGE_SIZE + 1;
   const endRow     = Math.min((page + 1) * PAGE_SIZE, total);
@@ -593,7 +650,7 @@ export default function TablePage() {
         {/* Appalachian toggle (Ohio-only — ARC counties are in OH) */}
         {isOhio && (
           <button
-            onClick={() => { setAppalachianOnly(v => !v); setCountyFilter(''); setCountyQuery(''); setPage(0); }}
+            onClick={() => { setAppalachianOnly(v => !v); setCountyFilter(''); setCountyQuery(''); setTownshipFilter(''); setPage(0); }}
             className="px-2 py-1 rounded text-xs font-medium border transition-colors"
             style={{
               borderColor:     '#a78bfa',
@@ -625,7 +682,7 @@ export default function TablePage() {
               <div className="absolute z-30 mt-1 max-h-64 overflow-auto bg-gray-800 border border-gray-600 rounded text-xs w-56 shadow-lg">
                 <button
                   type="button"
-                  onMouseDown={e => { e.preventDefault(); setCountyFilter(''); setCountyQuery(''); setCountyOpen(false); setPage(0); }}
+                  onMouseDown={e => { e.preventDefault(); setCountyFilter(''); setCountyQuery(''); setCountyOpen(false); setTownshipFilter(''); setPage(0); }}
                   className={`block w-full text-left px-3 py-1.5 hover:bg-gray-700 ${countyFilter === '' ? 'bg-gray-700 text-white' : 'text-gray-400'}`}
                 >
                   {appalachianOnly ? 'All ARC counties' : 'All counties'}
@@ -642,6 +699,7 @@ export default function TablePage() {
                       setCountyFilter(c);
                       setCountyQuery('');
                       setCountyOpen(false);
+                      setTownshipFilter('');
                       setPage(0);
                     }}
                     className={`block w-full text-left px-3 py-1.5 hover:bg-gray-700 ${countyFilter === c ? 'bg-gray-700 text-white' : 'text-gray-300'}`}
@@ -653,6 +711,60 @@ export default function TablePage() {
             );
           })()}
         </div>
+
+        {/* Township — searchable combobox, scoped to the selected county */}
+        {countyFilter && (
+        <div className="relative">
+          <input
+            type="text"
+            placeholder="Search townships…"
+            value={townshipOpen ? townshipQuery : townshipFilter}
+            onFocus={() => { setTownshipOpen(true); setTownshipQuery(''); }}
+            onChange={e => { setTownshipQuery(e.target.value); setTownshipOpen(true); }}
+            onBlur={() => setTimeout(() => setTownshipOpen(false), 150)}
+            className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs placeholder-gray-500 focus:outline-none focus:border-gray-400 w-40"
+          />
+          {townshipOpen && (() => {
+            const q = townshipQuery.trim().toLowerCase();
+            const matches = q
+              ? townships.filter(t => t.toLowerCase().includes(q))
+              : townships;
+            return (
+              <div className="absolute z-30 mt-1 max-h-64 overflow-auto bg-gray-800 border border-gray-600 rounded text-xs w-56 shadow-lg">
+                <button
+                  type="button"
+                  onMouseDown={e => { e.preventDefault(); setTownshipFilter(''); setTownshipQuery(''); setTownshipOpen(false); setPage(0); }}
+                  className={`block w-full text-left px-3 py-1.5 hover:bg-gray-700 ${townshipFilter === '' ? 'bg-gray-700 text-white' : 'text-gray-400'}`}
+                >
+                  All townships
+                </button>
+                {townships.length === 0 && (
+                  <div className="px-3 py-2 text-gray-500">No townships</div>
+                )}
+                {matches.length === 0 && townships.length > 0 && (
+                  <div className="px-3 py-2 text-gray-500">No matches</div>
+                )}
+                {matches.map(t => (
+                  <button
+                    key={t}
+                    type="button"
+                    onMouseDown={e => {
+                      e.preventDefault();
+                      setTownshipFilter(t);
+                      setTownshipQuery('');
+                      setTownshipOpen(false);
+                      setPage(0);
+                    }}
+                    className={`block w-full text-left px-3 py-1.5 hover:bg-gray-700 ${townshipFilter === t ? 'bg-gray-700 text-white' : 'text-gray-300'}`}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
+        )}
 
         {/* Priority pills (Ohio-only — risk scores not computed for PA/WV) */}
         {isOhio && (
@@ -800,7 +912,7 @@ export default function TablePage() {
           <thead className="sticky top-0 z-10 bg-gray-800">
             <tr>
               <Col label="Priority"     col="priority"                    sort={sortCol} dir={sortDir} onSort={handleSort} />
-              <Col label="Risk"         col="risk_score"                  sort={sortCol} dir={sortDir} onSort={handleSort} right />
+              <Col label="Risk"         col="composite_risk_score"        sort={sortCol} dir={sortDir} onSort={handleSort} right />
               <Col label="API No"       col="api_no"                      sort={sortCol} dir={sortDir} onSort={handleSort} />
               <Col label="Well Name"    col="well_name"                   sort={sortCol} dir={sortDir} onSort={handleSort} />
               <Col label="County"       col="county"                      sort={sortCol} dir={sortDir} onSort={handleSort} />
@@ -942,10 +1054,10 @@ function DataRow({ row, stripe }: { row: WellTableRow; stripe: boolean }) {
           : <Dash />}
       </td>
 
-      {/* Risk score */}
+      {/* Risk score — composite (6-dimension); this is what `priority` is derived from */}
       <td className="px-2 py-1 font-mono text-right whitespace-nowrap">
-        {row.risk_score != null
-          ? <span style={{ color: riskColor(row.risk_score) }}>{row.risk_score.toFixed(1)}</span>
+        {row.composite_risk_score != null
+          ? <span style={{ color: riskColor(row.composite_risk_score) }}>{row.composite_risk_score.toFixed(1)}</span>
           : <Dash />}
       </td>
 
